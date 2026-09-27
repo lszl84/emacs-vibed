@@ -1,0 +1,615 @@
+From a8c47a41e2df74cf37474f3ba9044e804cb9d380 Mon Sep 17 00:00:00 2001
+From: luke <luke@devmindscape.com>
+Date: Sun, 27 Sep 2026 22:33:18 +0200
+Subject: [PATCH 5/5] Add optional overlay scroll bars on PGTK
+
+GTK applications use overlay scroll bars: thin indicators drawn over
+the content that appear while scrolling or when the pointer is near,
+and fade out.  GTK only provides them inside GtkScrolledWindow, which
+Emacs doesn't use, so implement the behavior for Emacs' own scroll
+bars, using the theme's style for them.
+
+* src/pgtkterm.c (OVERLAY_SCROLL_BAR_DELAY)
+(OVERLAY_SCROLL_BAR_FADE_INTERVAL, OVERLAY_SCROLL_BAR_FADE_STEPS)
+(OVERLAY_SCROLL_BAR_PROXIMITY): New macros.
+(struct overlay_scroll_bar): New structure.
+(overlay_scroll_bar_state, overlay_scroll_bar_free)
+(overlay_scroll_bar_fade, overlay_scroll_bar_start_fade)
+(overlay_scroll_bar_reveal, overlay_scroll_bar_crossing)
+(overlay_scroll_bar_button, pgtk_overlay_scroll_bar_pointer)
+(watch_pgtk_overlay_scroll_bars): New functions.
+(pgtk_setup_overlay_scroll_bar): New function.
+(pgtk_set_vertical_scroll_bar): Place overlay scroll bars over the
+edge of the window's text, don't clear under them, and show them when
+the window scrolls.
+(motion_notify_event): Show overlay scroll bars near the pointer.
+(pgtk_new_font): Don't reserve columns for overlay scroll bars.
+(syms_of_pgtkterm) <pgtk-overlay-scroll-bars>: New variable.
+* src/pgtkterm.h (pgtk_setup_overlay_scroll_bar): Declare.
+* src/pgtkfns.c (pgtk_set_scroll_bar_default_width): Overlay scroll
+bars take no room.
+* src/gtkutil.c (xg_finish_scroll_bar_creation): Set up overlay scroll
+bars.
+(xg_get_scroll_bar_widget): New function.
+(xg_update_scrollbar_pos): Don't show, clear under, lower or garbage
+the frame for overlay scroll bars.
+* src/gtkutil.h (xg_get_scroll_bar_widget): Declare.
+* etc/NEWS: Announce 'pgtk-overlay-scroll-bars'.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ etc/NEWS       |   7 ++
+ src/gtkutil.c  |  53 +++++++--
+ src/gtkutil.h  |   3 +
+ src/pgtkfns.c  |   9 ++
+ src/pgtkterm.c | 299 ++++++++++++++++++++++++++++++++++++++++++++++++-
+ src/pgtkterm.h |   1 +
+ 6 files changed, 362 insertions(+), 10 deletions(-)
+
+diff --git a/etc/NEWS b/etc/NEWS
+index f8ff6c4..60fcfe3 100644
+--- a/etc/NEWS
++++ b/etc/NEWS
+@@ -24,6 +24,13 @@ with a prefix argument or by typing 'C-u C-h C-n'.
+ 
+ * Changes in Emacs 31.2
+ 
++---
++** New variable 'pgtk-overlay-scroll-bars'.
++When non-nil, vertical scroll bars on PGTK frames take no room in the
++window.  They are drawn over the edge of the window's text in the style
++of GTK's overlay scroll bars, appear while the window scrolls or the
++pointer is near them, and fade out afterwards.
++
+ ---
+ ** New variable 'pgtk-pace-scroll-events'.
+ When non-nil, PGTK frames merge pixel scroll events, such as those a
+diff --git a/src/gtkutil.c b/src/gtkutil.c
+index 8ec3d9c..6c3a41d 100644
+--- a/src/gtkutil.c
++++ b/src/gtkutil.c
+@@ -4601,6 +4601,13 @@ xg_finish_scroll_bar_creation (struct frame *f,
+                                const char *scroll_bar_name)
+ {
+   GtkWidget *webox = gtk_event_box_new ();
++#ifdef HAVE_PGTK
++  bool overlay = (pgtk_overlay_scroll_bars
++		  && (gtk_orientable_get_orientation (GTK_ORIENTABLE (wscroll))
++		      == GTK_ORIENTATION_VERTICAL));
++#else
++  bool overlay = false;
++#endif
+ #ifdef HAVE_GTK3
+   GtkCssProvider *foreground_provider;
+   GtkCssProvider *background_provider;
+@@ -4645,7 +4652,12 @@ xg_finish_scroll_bar_creation (struct frame *f,
+   gtk_fixed_put (GTK_FIXED (f->output_data.xp->edit_widget), webox, -1, -1);
+   gtk_container_add (GTK_CONTAINER (webox), wscroll);
+ 
+-  xg_set_widget_bg (f, webox, FRAME_BACKGROUND_PIXEL (f));
++#ifdef HAVE_PGTK
++  if (overlay)
++    pgtk_setup_overlay_scroll_bar (webox, wscroll);
++  else
++#endif
++    xg_set_widget_bg (f, webox, FRAME_BACKGROUND_PIXEL (f));
+ 
+   /* N.B. The event box doesn't become a real X11 window until we ask
+      for its XID via GTK_WIDGET_TO_X_WIN.  If the event box is not a
+@@ -4653,7 +4665,9 @@ xg_finish_scroll_bar_creation (struct frame *f,
+      Emacs main window, which we draw over using Xlib.  */
+   gtk_widget_realize (webox);
+ #ifdef HAVE_PGTK
+-  gtk_widget_show_all (webox);
++  /* Overlay scroll bars are shown only when needed.  */
++  if (!overlay)
++    gtk_widget_show_all (webox);
+ #elif defined HAVE_GTK3
+   bar->x_window = GTK_WIDGET_TO_X_WIN (webox);
+   gtk_widget_show_all (webox);
+@@ -4661,8 +4675,10 @@ xg_finish_scroll_bar_creation (struct frame *f,
+   GTK_WIDGET_TO_X_WIN (webox);
+ #endif
+ 
+-  /* Set the cursor to an arrow.  */
+-  xg_set_cursor (webox, FRAME_DISPLAY_INFO (f)->xg_cursor);
++  /* Set the cursor to an arrow.  An overlay scroll bar's event box has
++     no window of its own, so this would change the frame's cursor.  */
++  if (!overlay)
++    xg_set_cursor (webox, FRAME_DISPLAY_INFO (f)->xg_cursor);
+ 
+ #ifdef HAVE_GTK3
+   GtkStyleContext *ctxt = gtk_widget_get_style_context (wscroll);
+@@ -4767,6 +4783,17 @@ xg_remove_scroll_bar (struct frame *f, ptrdiff_t scrollbar_id)
+     }
+ }
+ 
++#ifdef HAVE_PGTK
++/* Return the widget of the scroll bar with SCROLLBAR_ID in frame F, or
++   NULL.  */
++
++GtkWidget *
++xg_get_scroll_bar_widget (struct frame *f, ptrdiff_t scrollbar_id)
++{
++  return xg_get_widget_from_map (scrollbar_id, FRAME_X_DISPLAY (f));
++}
++#endif
++
+ /* Update the position of the vertical scroll bar represented by SCROLLBAR_ID
+    in frame F.
+    TOP/LEFT are the new pixel positions where the bar shall appear.
+@@ -4791,6 +4818,14 @@ xg_update_scrollbar_pos (struct frame *f,
+ #endif
+       gint msl;
+       int scale = xg_get_scale (f);
++#ifdef HAVE_PGTK
++      /* Overlay scroll bars draw over the frame's contents and are
++	 shown and hidden by pgtkterm.c.  */
++      bool overlay = g_object_get_data (G_OBJECT (wscroll),
++					"emacs-overlay-scroll-bar") != NULL;
++#else
++      bool overlay = false;
++#endif
+ 
+       top /= scale;
+       left /= scale;
+@@ -4819,7 +4854,8 @@ xg_update_scrollbar_pos (struct frame *f,
+         }
+       else
+         {
+-          gtk_widget_show_all (wparent);
++	  if (!overlay)
++	    gtk_widget_show_all (wparent);
+           gtk_widget_set_size_request (wscroll, width, height);
+ 
+ #if !defined HAVE_PGTK && defined HAVE_GTK3
+@@ -4833,7 +4869,7 @@ xg_update_scrollbar_pos (struct frame *f,
+ #endif
+         }
+ 
+-      if (oldx != -1 && oldw > 0 && oldh > 0)
++      if (!overlay && oldx != -1 && oldw > 0 && oldh > 0)
+         {
+           /* Clear under old scroll bar position.  */
+           oldw += (scale - 1) * oldw;
+@@ -4845,7 +4881,7 @@ xg_update_scrollbar_pos (struct frame *f,
+ #endif
+         }
+ 
+-      if (!hidden)
++      if (!hidden && !overlay)
+ 	{
+ 	  GtkWidget *scrollbar = xg_get_widget_from_map (scrollbar_id,
+ 							 FRAME_X_DISPLAY (f));
+@@ -4868,7 +4904,8 @@ xg_update_scrollbar_pos (struct frame *f,
+ #else
+       gdk_flush ();
+ #endif
+-      SET_FRAME_GARBAGED (f);
++      if (!overlay)
++	SET_FRAME_GARBAGED (f);
+       cancel_mouse_face (f);
+     }
+ }
+diff --git a/src/gtkutil.h b/src/gtkutil.h
+index b94ed25..c6a755c 100644
+--- a/src/gtkutil.h
++++ b/src/gtkutil.h
+@@ -127,6 +127,9 @@ #define XG_ITEM_DATA "emacs_menuitem"
+ 					     const char *scroll_bar_name);
+ extern void xg_remove_scroll_bar (struct frame *f, ptrdiff_t scrollbar_id);
+ 
++#ifdef HAVE_PGTK
++extern GtkWidget *xg_get_scroll_bar_widget (struct frame *, ptrdiff_t);
++#endif
+ extern void xg_update_scrollbar_pos (struct frame *f,
+                                      ptrdiff_t scrollbar_id,
+                                      int top,
+diff --git a/src/pgtkfns.c b/src/pgtkfns.c
+index 4257dc4..88dc9db 100644
+--- a/src/pgtkfns.c
++++ b/src/pgtkfns.c
+@@ -2223,6 +2223,15 @@ pgtk_set_scroll_bar_default_width (struct frame *f)
+ {
+   int unit = FRAME_COLUMN_WIDTH (f);
+   int minw = xg_get_default_scrollbar_width (f);
++
++  /* Overlay scroll bars take no room.  */
++  if (pgtk_overlay_scroll_bars)
++    {
++      FRAME_CONFIG_SCROLL_BAR_COLS (f) = 0;
++      FRAME_CONFIG_SCROLL_BAR_WIDTH (f) = 0;
++      return;
++    }
++
+   /* A minimum width of 14 doesn't look good for toolkit scroll bars.  */
+   FRAME_CONFIG_SCROLL_BAR_COLS (f) = (minw + unit - 1) / unit;
+   FRAME_CONFIG_SCROLL_BAR_WIDTH (f) = minw;
+diff --git a/src/pgtkterm.c b/src/pgtkterm.c
+index d389027..8a6589b 100644
+--- a/src/pgtkterm.c
++++ b/src/pgtkterm.c
+@@ -1099,6 +1099,8 @@ pgtk_new_font (struct frame *f, Lisp_Object font_object, int fontset)
+       FRAME_CONFIG_SCROLL_BAR_COLS (f)
+ 	= (FRAME_CONFIG_SCROLL_BAR_WIDTH (f) + wid - 1) / wid;
+     }
++  else if (pgtk_overlay_scroll_bars)
++    FRAME_CONFIG_SCROLL_BAR_COLS (f) = 0;
+   else
+     {
+       int wid = FRAME_COLUMN_WIDTH (f);
+@@ -4468,6 +4470,200 @@ pgtk_scroll_bar_remove (struct scroll_bar *bar)
+    characters, starting at POSITION.  If WINDOW has no scroll bar,
+    create one.  */
+ 
++/* Overlay scroll bars (`pgtk-overlay-scroll-bars').  The vertical
++   scroll bar takes no room in the window: it floats over the right
++   edge of the window's text, styled like the overlay scroll bars of
++   GTK's scrolled windows, and is shown only while the window scrolls
++   or the pointer is near it.  */
++
++/* Milliseconds the bar stays after the last activity, and the length
++   and number of the steps in which it then fades out.  */
++#define OVERLAY_SCROLL_BAR_DELAY 1000
++#define OVERLAY_SCROLL_BAR_FADE_INTERVAL 20
++#define OVERLAY_SCROLL_BAR_FADE_STEPS 10
++
++/* Show the bar when the pointer is this many pixels from it.  */
++#define OVERLAY_SCROLL_BAR_PROXIMITY 24
++
++struct overlay_scroll_bar
++{
++  /* Timer that fades the bar out, or 0.  */
++  guint timer;
++  int fade_step;
++  bool hovering, dragging;
++};
++
++static struct overlay_scroll_bar *
++overlay_scroll_bar_state (GtkWidget *wscroll)
++{
++  return g_object_get_data (G_OBJECT (wscroll), "emacs-overlay-scroll-bar");
++}
++
++static void
++overlay_scroll_bar_free (gpointer data)
++{
++  struct overlay_scroll_bar *o = data;
++
++  if (o->timer)
++    g_source_remove (o->timer);
++  g_free (o);
++}
++
++static gboolean
++overlay_scroll_bar_fade (gpointer data)
++{
++  GtkWidget *wscroll = data;
++  struct overlay_scroll_bar *o = overlay_scroll_bar_state (wscroll);
++
++  if (++o->fade_step < OVERLAY_SCROLL_BAR_FADE_STEPS)
++    {
++      gtk_widget_set_opacity (wscroll,
++			      1.0 - ((double) o->fade_step
++				     / OVERLAY_SCROLL_BAR_FADE_STEPS));
++      return G_SOURCE_CONTINUE;
++    }
++
++  /* Hide the bar, so that it doesn't take clicks meant for the text
++     below it.  */
++  gtk_widget_hide (gtk_widget_get_parent (wscroll));
++  gtk_widget_set_opacity (wscroll, 1.0);
++  o->timer = 0;
++  return G_SOURCE_REMOVE;
++}
++
++static gboolean
++overlay_scroll_bar_start_fade (gpointer data)
++{
++  struct overlay_scroll_bar *o = overlay_scroll_bar_state (data);
++
++  o->fade_step = 0;
++  o->timer = g_timeout_add (OVERLAY_SCROLL_BAR_FADE_INTERVAL,
++			    overlay_scroll_bar_fade, data);
++  return G_SOURCE_REMOVE;
++}
++
++/* Show the overlay scroll bar WSCROLL, and hide it again after a
++   while unless the pointer is on it.  */
++
++static void
++overlay_scroll_bar_reveal (GtkWidget *wscroll)
++{
++  struct overlay_scroll_bar *o = overlay_scroll_bar_state (wscroll);
++  gint width, height, min_slider_length;
++
++  if (!o)
++    return;
++
++  if (o->timer)
++    {
++      g_source_remove (o->timer);
++      o->timer = 0;
++    }
++
++  /* xg_update_scrollbar_pos hides bars that don't fit.  */
++  gtk_widget_get_size_request (wscroll, &width, &height);
++  gtk_widget_style_get (wscroll, "min-slider-length", &min_slider_length,
++			NULL);
++  if (height < min_slider_length)
++    return;
++
++  gtk_widget_set_opacity (wscroll, 1.0);
++  gtk_widget_show_all (gtk_widget_get_parent (wscroll));
++
++  if (!o->hovering && !o->dragging)
++    o->timer = g_timeout_add (OVERLAY_SCROLL_BAR_DELAY,
++			      overlay_scroll_bar_start_fade, wscroll);
++}
++
++static gboolean
++overlay_scroll_bar_crossing (GtkWidget *wscroll, GdkEventCrossing *event,
++			     gpointer data)
++{
++  struct overlay_scroll_bar *o = overlay_scroll_bar_state (wscroll);
++  GtkStyleContext *ctxt = gtk_widget_get_style_context (wscroll);
++
++  o->hovering = event->type == GDK_ENTER_NOTIFY;
++  if (o->hovering)
++    gtk_style_context_add_class (ctxt, "hovering");
++  else
++    gtk_style_context_remove_class (ctxt, "hovering");
++  overlay_scroll_bar_reveal (wscroll);
++  return FALSE;
++}
++
++static gboolean
++overlay_scroll_bar_button (GtkWidget *wscroll, GdkEventButton *event,
++			   gpointer data)
++{
++  struct overlay_scroll_bar *o = overlay_scroll_bar_state (wscroll);
++  GtkStyleContext *ctxt = gtk_widget_get_style_context (wscroll);
++
++  o->dragging = event->type != GDK_BUTTON_RELEASE;
++  if (o->dragging)
++    gtk_style_context_add_class (ctxt, "dragging");
++  else
++    gtk_style_context_remove_class (ctxt, "dragging");
++  overlay_scroll_bar_reveal (wscroll);
++  return FALSE;
++}
++
++/* Make the vertical scroll bar WSCROLL, inside the event box WEBOX, an
++   overlay scroll bar.  Called by xg_finish_scroll_bar_creation before
++   WEBOX is realized.  */
++
++void
++pgtk_setup_overlay_scroll_bar (GtkWidget *webox, GtkWidget *wscroll)
++{
++  struct overlay_scroll_bar *o = g_new0 (struct overlay_scroll_bar, 1);
++
++  g_object_set_data_full (G_OBJECT (wscroll), "emacs-overlay-scroll-bar",
++			  o, overlay_scroll_bar_free);
++
++  /* Draw the bar over the frame's contents, without a background of
++     its own, using the theme's style for overlay scroll bars.  */
++  gtk_event_box_set_visible_window (GTK_EVENT_BOX (webox), FALSE);
++  gtk_style_context_add_class (gtk_widget_get_style_context (wscroll),
++			       "overlay-indicator");
++
++  gtk_widget_add_events (wscroll, (GDK_ENTER_NOTIFY_MASK
++				   | GDK_LEAVE_NOTIFY_MASK
++				   | GDK_BUTTON_PRESS_MASK
++				   | GDK_BUTTON_RELEASE_MASK));
++  g_signal_connect (G_OBJECT (wscroll), "enter-notify-event",
++		    G_CALLBACK (overlay_scroll_bar_crossing), NULL);
++  g_signal_connect (G_OBJECT (wscroll), "leave-notify-event",
++		    G_CALLBACK (overlay_scroll_bar_crossing), NULL);
++  g_signal_connect (G_OBJECT (wscroll), "button-press-event",
++		    G_CALLBACK (overlay_scroll_bar_button), NULL);
++  g_signal_connect (G_OBJECT (wscroll), "button-release-event",
++		    G_CALLBACK (overlay_scroll_bar_button), NULL);
++}
++
++/* Show the overlay scroll bar of the window of F at X, Y if the
++   pointer is near it.  */
++
++static void
++pgtk_overlay_scroll_bar_pointer (struct frame *f, double x, double y)
++{
++  Lisp_Object window
++    = window_from_coordinates (f, x, y, 0, false, false, false);
++  struct scroll_bar *bar;
++  GtkWidget *wscroll;
++
++  if (!WINDOWP (window) || NILP (XWINDOW (window)->vertical_scroll_bar))
++    return;
++
++  bar = XSCROLL_BAR (XWINDOW (window)->vertical_scroll_bar);
++  if (x >= bar->left - OVERLAY_SCROLL_BAR_PROXIMITY
++      && x < bar->left + bar->width + OVERLAY_SCROLL_BAR_PROXIMITY
++      && y >= bar->top && y < bar->top + bar->height)
++    {
++      wscroll = xg_get_scroll_bar_widget (f, bar->x_window);
++      if (wscroll)
++	overlay_scroll_bar_reveal (wscroll);
++    }
++}
++
+ static void
+ pgtk_set_vertical_scroll_bar (struct window *w, int portion, int whole,
+ 			      int position)
+@@ -4477,6 +4673,9 @@ pgtk_set_vertical_scroll_bar (struct window *w, int portion, int whole,
+   struct scroll_bar *bar;
+   int top, height, left, width;
+   int window_y, window_height;
++  bool overlay = pgtk_overlay_scroll_bars;
++  GtkWidget *wscroll = NULL;
++  gdouble old_value = 0, old_upper = 0;
+ 
+   /* Get window dimensions.  */
+   window_box (w, ANY_AREA, 0, &window_y, 0, &window_height);
+@@ -4485,10 +4684,21 @@ pgtk_set_vertical_scroll_bar (struct window *w, int portion, int whole,
+   left = WINDOW_SCROLL_BAR_AREA_X (w);
+   width = WINDOW_SCROLL_BAR_AREA_WIDTH (w);
+ 
++  /* An overlay scroll bar goes over the edge of the window's text.  */
++  if (overlay)
++    {
++      width = xg_get_default_scrollbar_width (f);
++      if (WINDOW_HAS_VERTICAL_SCROLL_BAR_ON_LEFT (w))
++	left = WINDOW_BOX_LEFT_EDGE_X (w);
++      else
++	left = (WINDOW_BOX_RIGHT_EDGE_X (w)
++		+ WINDOW_SCROLL_BAR_AREA_WIDTH (w) - width);
++    }
++
+   /* Does the scroll bar exist yet?  */
+   if (NILP (w->vertical_scroll_bar))
+     {
+-      if (width > 0 && height > 0)
++      if (!overlay && width > 0 && height > 0)
+ 	{
+ 	  block_input ();
+           pgtk_clear_area (f, left, top, width, height);
+@@ -4520,7 +4730,7 @@ pgtk_set_vertical_scroll_bar (struct window *w, int portion, int whole,
+ 	{
+ 	  /* Since toolkit scroll bars are smaller than the space reserved
+ 	     for them on the frame, we have to clear "under" them.  */
+-	  if (width > 0 && height > 0)
++	  if (!overlay && width > 0 && height > 0)
+ 	    pgtk_clear_area (f, left, top, width, height);
+           xg_update_scrollbar_pos (f, bar->x_window, top,
+ 				   left, width, max (height, 1));
+@@ -4533,10 +4743,32 @@ pgtk_set_vertical_scroll_bar (struct window *w, int portion, int whole,
+       bar->height = height;
+ 
+       unblock_input ();
++
++      if (overlay)
++	wscroll = xg_get_scroll_bar_widget (f, bar->x_window);
++      if (wscroll)
++	{
++	  GtkAdjustment *adj = gtk_range_get_adjustment (GTK_RANGE (wscroll));
++	  old_value = gtk_adjustment_get_value (adj);
++	  old_upper = gtk_adjustment_get_upper (adj);
++	}
+     }
+ 
+   pgtk_set_toolkit_scroll_bar_thumb (bar, portion, position, whole);
+ 
++  /* Show an overlay scroll bar while its window scrolls.  */
++  if (wscroll)
++    {
++      GtkAdjustment *adj = gtk_range_get_adjustment (GTK_RANGE (wscroll));
++      if (gtk_adjustment_get_value (adj) != old_value
++	  || gtk_adjustment_get_upper (adj) != old_upper)
++	{
++	  block_input ();
++	  overlay_scroll_bar_reveal (wscroll);
++	  unblock_input ();
++	}
++    }
++
+   XSETVECTOR (barobj, bar);
+   wset_vertical_scroll_bar (w, barobj);
+ }
+@@ -6270,6 +6502,9 @@ motion_notify_event (GtkWidget *widget, GdkEvent *event,
+   if (f && xg_event_is_for_scrollbar (f, event, false))
+     f = 0;
+ 
++  if (f && pgtk_overlay_scroll_bars)
++    pgtk_overlay_scroll_bar_pointer (f, event->motion.x, event->motion.y);
++
+   if (f)
+     {
+       /* Maybe generate a SELECT_WINDOW_EVENT for
+@@ -7749,6 +7984,46 @@ pgtk_clear_area (struct frame *f, int x, int y, int width, int height)
+ }
+ 
+ 
++/* Watcher for `pgtk-overlay-scroll-bars': replace the scroll bars of
++   all frames, and give them room or take it away.  */
++
++static Lisp_Object
++watch_pgtk_overlay_scroll_bars (Lisp_Object symbol, Lisp_Object newval,
++				Lisp_Object operation, Lisp_Object where)
++{
++  Lisp_Object tail, frame;
++
++  /* Ignore buffer-local bindings.  */
++  if (!NILP (where))
++    return Qnil;
++
++  /* The variable is set after the watchers run, but the scroll bar
++     width computed below depends on it.  */
++  pgtk_overlay_scroll_bars = !NILP (newval);
++
++  FOR_EACH_FRAME (tail, frame)
++    {
++      struct frame *f = XFRAME (frame);
++
++      if (!FRAME_PGTK_P (f) || !FRAME_LIVE_P (f))
++	continue;
++
++      /* Redisplay recreates the scroll bars in the new style.  */
++      block_input ();
++      pgtk_condemn_scroll_bars (f);
++      pgtk_judge_scroll_bars (f);
++      unblock_input ();
++
++      /* Go back to the default width, which is 0 for overlay scroll
++	 bars.  */
++      Fmodify_frame_parameters (frame, list1 (Fcons (Qscroll_bar_width,
++						      Qnil)));
++      SET_FRAME_GARBAGED (f);
++    }
++
++  return Qnil;
++}
++
+ void
+ syms_of_pgtkterm (void)
+ {
+@@ -7834,6 +8109,26 @@ syms_of_pgtkterm (void)
+     doc: /* Hash table of character codes indexed by X keysym codes.  */);
+   Vpgtk_keysym_table = make_hash_table (&hashtest_eql, 900, Weak_None);
+ 
++  DEFVAR_BOOL ("pgtk-overlay-scroll-bars", pgtk_overlay_scroll_bars,
++    doc: /* Non-nil means vertical scroll bars float over the text.
++When this is non-nil, vertical scroll bars take no room in the
++window.  Each is drawn over the edge of its window's text, in the style
++of GTK's overlay scroll bars, while the window scrolls and while the
++pointer is near it, and fades out after a second.  Setting this
++variable affects all frames, and resets their `scroll-bar-width'
++parameter to the default.  */);
++  pgtk_overlay_scroll_bars = false;
++  DEFSYM (Qpgtk_overlay_scroll_bars, "pgtk-overlay-scroll-bars");
++  {
++    Lisp_Object watcher;
++    static union Aligned_Lisp_Subr Swatch_pgtk_overlay_scroll_bars =
++      {{{ PSEUDOVECTOR_FLAG | (PVEC_SUBR << PSEUDOVECTOR_AREA_BITS) },
++	{ .a4 = watch_pgtk_overlay_scroll_bars },
++	4, 4, "watch_pgtk_overlay_scroll_bars", {0}, lisp_h_Qnil}};
++    XSETSUBR (watcher, &Swatch_pgtk_overlay_scroll_bars.s);
++    Fadd_variable_watcher (Qpgtk_overlay_scroll_bars, watcher);
++  }
++
+   DEFVAR_BOOL ("pgtk-pace-scroll-events", pgtk_pace_scroll_events,
+     doc: /* Non-nil means handle pixel scroll events at the pace of redisplay.
+ A touchpad sends pixel scroll events much faster than Emacs can
+diff --git a/src/pgtkterm.h b/src/pgtkterm.h
+index 6d4ec24..0300295 100644
+--- a/src/pgtkterm.h
++++ b/src/pgtkterm.h
+@@ -606,6 +606,7 @@ #define SELECTION_EVENT_TIME(eventp)	\
+ 
+ /* Implemented in pgtkterm.c */
+ extern void pgtk_clear_area (struct frame *, int, int, int, int);
++extern void pgtk_setup_overlay_scroll_bar (GtkWidget *, GtkWidget *);
+ extern int pgtk_gtk_to_emacs_modifiers (struct pgtk_display_info *, int);
+ extern void pgtk_clear_under_internal_border (struct frame *);
+ extern void pgtk_set_event_handler (struct frame *);
+-- 
+2.55.0
+

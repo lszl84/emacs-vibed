@@ -1,7 +1,7 @@
 From 77a8a1abf05858ad61bed7fca890f4e2a122457d Mon Sep 17 00:00:00 2001
 From: luke <luke@devmindscape.com>
 Date: Sun, 27 Sep 2026 00:55:51 +0200
-Subject: [PATCH 1/4] Copy only the damaged part of the back buffer to the
+Subject: [PATCH 1/5] Copy only the damaged part of the back buffer to the
  screen on PGTK
 
 After every redisplay, PGTK invalidated the whole frame widget, so

@@ -10,6 +10,10 @@ lags more than X11), [bug#71591](https://debbugs.gnu.org/71591) (input lag with 
 scaling), [bug#59134](https://debbugs.gnu.org/59134) (pixel scroll precision is CPU
 intensive). The patches have not been sent upstream.
 
+A fifth, optional patch adds **GTK-style overlay scroll bars**: no reserved strip, a thin
+indicator over the edge of the text that appears while scrolling or when the pointer is
+near, and fades out, like in other GTK apps.
+
 ## Video
 
 ![Unpatched vs patched Emacs scrolling the same Org file on a 4K screen](media/scrolling-comparison.gif)
@@ -83,6 +87,17 @@ lines in total.
    events of `pixel-scroll-precision-mode`, i.e. when `mwheel-coalesce-scroll-events` is
    nil.
 
+5. **Overlay scroll bars** (`0005-Add-optional-overlay-scroll-bars-on-PGTK.patch`),
+   **opt-in**. GTK 3 gives overlay scroll bars only to `GtkScrolledWindow`, which Emacs
+   doesn't use: it places plain `GtkScrollbar` widgets in a strip reserved next to each
+   window. When the new variable **`pgtk-overlay-scroll-bars`** is non-nil, that strip is
+   0 wide, and each vertical scroll bar floats over the right edge of its window's text,
+   with the theme's `overlay-indicator` style (the thin pill of GTK apps). It appears
+   while the window scrolls or when the pointer is within 24 px, widens while hovered
+   or dragged, and fades out a second later, then hides so it doesn't take clicks.
+   Setting the variable applies to all frames at once. The slider color is the
+   `scroll-bar` face's foreground. Horizontal scroll bars are unchanged.
+
 **What's left** at 4K full screen is mostly GTK 3 itself: before Emacs copies its frame,
 GDK clears the region and GtkWindow paints its CSS background, together ~8 ms per
 frame. Plus Emacs' own redisplay layout, ~7 ms. [NOTES.md](NOTES.md) lists the ideas
@@ -119,10 +134,10 @@ git clone --branch emacs-31 https://git.savannah.gnu.org/git/emacs.git
 cd emacs
 git checkout -b vibed b4fdff95b3e686130bd376b4eb43bb719280a4a3
 git am ../emacs-vibed/patches/*.patch        # needs git user.name/user.email set
-git log --oneline -5                          # the 4 patch commits on top of b4fdff9
+git log --oneline -6                          # the 5 patch commits on top of b4fdff9
 ```
 
-Without git: `patch -p1 < ../emacs-vibed/patches/000N-*.patch` for N = 1..4, in order.
+Without git: `patch -p1 < ../emacs-vibed/patches/000N-*.patch` for N = 1..5, in order.
 
 ### 3. Configure and build
 
@@ -140,13 +155,14 @@ compilation doesn't affect this display code.
 ### 4. Run it (without installing)
 
 ```bash
-src/emacs --eval '(progn (pixel-scroll-precision-mode 1) (setq pgtk-pace-scroll-events t))' FILE
+src/emacs --eval '(progn (pixel-scroll-precision-mode 1) (setq pgtk-pace-scroll-events t)
+                          (setq pgtk-overlay-scroll-bars t) (scroll-bar-mode 1))' FILE
 ```
 
 This runs as an ordinary GUI Emacs with your normal config, next to any installed Emacs
 or running daemon, as long as your config doesn't call `server-start`. Use `-Q` to
 leave your config out. `M-: (setq pgtk-pace-scroll-events nil)` switches patch 4 off at
-run time, for comparison.
+run time, for comparison, and `pgtk-overlay-scroll-bars` switches patch 5.
 
 To use it permanently, `sudo make install` (or, on Arch, use the package below) and add
 this to your `init.el`:
@@ -155,20 +171,36 @@ this to your `init.el`:
 (pixel-scroll-precision-mode 1)
 (when (boundp 'pgtk-pace-scroll-events)
   (setq pgtk-pace-scroll-events t))
+;; Overlay scroll bars; `scroll-bar-mode' is needed if your config turns them off.
+(when (boundp 'pgtk-overlay-scroll-bars)
+  (setq pgtk-overlay-scroll-bars t)
+  (scroll-bar-mode 1))
+```
+
+The `boundp` checks keep the same config working on an unpatched Emacs. To color the
+slider to match your theme, set the `scroll-bar` face and refresh it when themes change:
+
+```elisp
+(defun my/scroll-bar-match-theme (&rest _)
+  (let ((color (face-foreground 'default nil t)))   ; or your theme's accent color
+    (when (and (stringp color) (string-prefix-p "#" color))
+      (set-face-attribute 'scroll-bar nil :foreground color))))
+(add-hook 'enable-theme-functions #'my/scroll-bar-match-theme)
+(my/scroll-bar-match-theme)
 ```
 
 ### Arch Linux: a patched `emacs-wayland` package
 
 [`arch/PKGBUILD`](arch/PKGBUILD) is Arch's own `emacs-wayland` recipe (31.1-2), reduced to
 the Wayland variant, with the same configure flags (including native compilation) and
-the four patches applied to the 31.1 release tarball. It keeps the package name, so it
+the five patches applied to the 31.1 release tarball. It keeps the package name, so it
 replaces the stock package and works with the usual systemd user service and
 `emacsclient`:
 
 ```bash
 cd emacs-vibed/arch
 makepkg -s --skippgpcheck        # ~30-60 min; the tarball is checked against Arch's b2sum
-sudo pacman -U emacs-wayland-31.1-2.1-x86_64.pkg.tar.zst
+sudo pacman -U emacs-wayland-31.1-2.2-x86_64.pkg.tar.zst
 ```
 
 Then add `IgnorePkg = emacs-wayland` to the `[options]` section of `/etc/pacman.conf`,
@@ -180,7 +212,7 @@ update `pkgver`, check that the patches still apply, and rebuild. To go back:
 
 | Path | What |
 |---|---|
-| `patches/` | The 4 patches (`git format-patch`, GNU ChangeLog-style messages, NEWS entry). |
+| `patches/` | The 5 patches (`git format-patch`, GNU ChangeLog-style messages, NEWS entry). |
 | `NOTES.md` | Base commit, method, all measurements (per patch), profiles, correctness checks, known pre-existing bugs, ideas not done. |
 | `arch/` | `PKGBUILD` for a patched Arch `emacs-wayland` package (links to `patches/`). |
 | `media/` | The comparison video (GIF, 1080p and 4K MP4). |

@@ -1,7 +1,7 @@
 From 408929d7080806b3bd76aa5fe1380d26961bb54d Mon Sep 17 00:00:00 2001
 From: luke <luke@devmindscape.com>
 Date: Sun, 27 Sep 2026 01:02:15 +0200
-Subject: [PATCH 3/4] Scroll the back buffer in place on PGTK
+Subject: [PATCH 3/5] Scroll the back buffer in place on PGTK
 
 pgtk_copy_bits copied the scrolled area into a temporary surface and
 back, which at 4K moves about 60 MB per scroll step.

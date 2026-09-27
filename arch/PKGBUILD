@@ -11,11 +11,11 @@
 
 pkgname=emacs-wayland
 pkgver=31.1
-pkgrel=2.1
+pkgrel=2.2
 arch=('x86_64')
 url='https://github.com/lszl84/emacs-vibed'
 license=(GPL-3.0-or-later)
-pkgdesc='The extensible, customizable, self-documenting real-time display editor with PGTK enabled (emacs-vibed smooth scrolling patches)'
+pkgdesc='The extensible, customizable, self-documenting real-time display editor with PGTK enabled (emacs-vibed smooth scrolling and overlay scroll bar patches)'
 depends=(
   gmp
   gnutls
@@ -51,13 +51,15 @@ source=(
   0002-Copy-the-back-buffer-to-the-screen-instead-of-compos.patch
   0003-Scroll-the-back-buffer-in-place-on-PGTK.patch
   0004-Optionally-pace-pixel-scroll-events-to-redisplay-on-.patch
+  0005-Add-optional-overlay-scroll-bars-on-PGTK.patch
 )
 b2sums=('c9f8cf37553c0e2913eb12d7e069735c23baca3b725332f17b4b4784d1e4987c9ae098dae669e65e49fa01d8b9a63e518b210640892216e0a9ae02e51f3d0581'
         'SKIP'
-        'd67fe5c4450a3fa8bb14e08c9ae75c08dac39c2e99a1cd9138e51b7ada062112737eba25470a9a79dc3d0ba34bbcb1d50f5912ee5026319e1db51eb42c09c394'
-        '94718faf999f3b1d85b442ca3223c61ef87e60c622997968e2c65debe33336aee8d96d0e8a775cd4f332f251bf7d5676f2c16b6ee8779fb1d4d3ab5b4367f3e1'
-        'b96508a43af72972d543d5ffd75d56d0b5f574ca80b03d97bbff71bbfe1da4b46d6165520ef1429a4b1d93180c3a401b31972102b1bf18c4b1d49d27ba08c1ef'
-        'b1cfdd964fc7606098029c438db99c331f0bb7d91af8c9eb12a392ee2018ea92f35c44a43fb47b1eee175eacb4915e089d87c9c537d81faab582ab825ab13844')
+        'f55e71a2f9f67e12942fe02a9772880b4da1af4c1740d0c7e0c3ced67fd5eef9a308d368d2f9b410e25c9a2767b0ed967c021c56bcaf5d71c870d683b45623ab'
+        '03a4ce6ddac2e6bf35ad34313fc9b37e77ce9a442ffd49043ac241ba7c45e50d852a564030b34c4c428df38858f4df07688c7f3652bf3615a92f8999fa4dea0e'
+        '416c1a41abb9066823dccdb626ecd4c7578c3b818e91cc15f87986d10d2b8475a87b0e3909433a991e12e956d791c39767d5403eca82c28c9dea036e71c60268'
+        'b3d81a48d687c914254fd130a1ee6651a70ced7086dfab0213a2146b31c92e8c625a8f0da2f6b869e07f34be8fccf31e5d458a3f52c2d22b8261170247678a33'
+        'a0a49ab09e11a2dca3d780d389c29f0cd3f74512dc1ba0663702aa4addc5464a1037945d42a9066c27446cf0028895d7e00b4b4ca08d2ce9727460e501e30497')
 validpgpkeys=(
   '17E90D521672C04631B1183EE78DAE0F3115E06B'  # Eli Zaretskii <eliz@gnu.org>
   'CEA1DE21AB108493CC9C65742E82323B8F4353EE'  # Stefan Kangas <stefankangas@gmail.com>

@@ -1,6 +1,7 @@
 /* vscroll: emulate touchpad (finger-source) scrolling via zwlr_virtual_pointer_v1.
    usage: vscroll X Y SEG...   where each SEG is  DIR:SECONDS:RATE_HZ:VALUE
    DIR is d (content moves up; axis +) or u, or p (pause, no events).
+   Also m:X:Y (move pointer) and b:1 / b:0 (press / release button 1).
    Every segment ends with axis_stop (like lifting fingers).  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -65,6 +66,22 @@ int main (int argc, char **argv)
   for (int i = 3; i < argc; i++)
     {
       char dir; double sec, hz = 100, val = 0;
+      int mx, my, state;
+      /* m:X:Y moves the pointer; b:1 / b:0 presses / releases button 1.  */
+      if (sscanf (argv[i], "m:%d:%d", &mx, &my) == 2)
+	{
+	  zwlr_virtual_pointer_v1_motion_absolute (p, now_ms (), mx - lx, my - ly, lw, lh);
+	  zwlr_virtual_pointer_v1_frame (p);
+	  wl_display_roundtrip (dpy);
+	  continue;
+	}
+      if (sscanf (argv[i], "b:%d", &state) == 1)
+	{
+	  zwlr_virtual_pointer_v1_button (p, now_ms (), 0x110 /* BTN_LEFT */, state);
+	  zwlr_virtual_pointer_v1_frame (p);
+	  wl_display_roundtrip (dpy);
+	  continue;
+	}
       int nf = sscanf (argv[i], "%c:%lf:%lf:%lf", &dir, &sec, &hz, &val);
       if (nf != 4 && !(dir == 'p' && nf == 2))
 	{ fprintf (stderr, "bad seg %s\n", argv[i]); return 2; }

@@ -17,7 +17,9 @@ are in [docs/task-brief.md](docs/task-brief.md).
     measurements below).
   - "clean": the base commit plus the 4 patches only (for trying it out and for the
     compiler-warning check).
-- Patches: `patches/0001..0004` (`git format-patch` of the clean tree).
+- Patches: `patches/0001..0005` (`git format-patch` of the clean tree). All scrolling
+  measurements below were taken with patches 1–4; patch 5 (overlay scroll bars) came
+  later and doesn't touch the scrolling path.
 - Test machine: ThinkPad X1 Carbon 7th gen, Intel i5-8365U with UHD 620 graphics, 16 GB
   RAM, Arch Linux (Omarchy) with Hyprland 0.56, built-in 3840x2160 panel at scale 2.
 
@@ -29,6 +31,7 @@ are in [docs/task-brief.md](docs/task-brief.md).
 | 2 | Copy the back buffer to the screen instead of compositing it | +18 | `pgtk_handle_draw` paints the image back buffer with `CAIRO_OPERATOR_SOURCE`, clipped to its size, instead of OVER, inside `cairo_save`/`cairo_restore`, since GTK goes on to draw the scroll bars with the same `cairo_t`; the scroll bars are pixel-identical to the unpatched build. The result is the same: the buffer is opaque, or, with `alpha-background`, the window is app-paintable and clear. It's a blit instead of a per-pixel blend. Not in the original A/B/C plan; kept separate so it can be dropped. |
 | 3 | Scroll the back buffer in place (step B) | +70 | `pgtk_copy_bits` `memmove`s rows inside the image surface (device-scale aware, correct row order for overlap, `cairo_surface_mark_dirty_rectangle`) instead of copying through a temporary surface. Falls back to the old code for non-image surfaces, other formats, non-integral device coordinates or out-of-bounds rects. Verified at runtime: the back buffer is `CAIRO_SURFACE_TYPE_IMAGE`. |
 | 4 | Optionally pace pixel scroll events to redisplay (step C) | +168 -2 | New variable **`pgtk-pace-scroll-events`** (default nil, opt-in because it changes how many events Lisp sees). When non-nil, pixel scroll events (the `(nil DX DY)` wheel events of `pixel-scroll-precision-mode`) that arrive before the previous one has been redisplayed and drawn by GTK are merged into one event (deltas summed), so Emacs runs one command and one redisplay per frame GTK draws. Details below. Includes a NEWS entry. |
+| 5 | Add optional overlay scroll bars | +280 | New variable **`pgtk-overlay-scroll-bars`** (default nil). Vertical scroll bars take no room and float over the window's text in GTK's overlay style, shown while scrolling or when the pointer is near. Details below. |
 
 Total +330/-5 lines in `src/pgtkterm.c`, `src/pgtkterm.h`, `etc/NEWS`. No warnings with
 the git-checkout warning flags (`-Wall -Wextra ...`).
@@ -56,6 +59,39 @@ the git-checkout warning flags (`-Wall -Wextra ...`).
   raising SIGIO to re-check made Emacs spin inside redisplay (some loop in redisplay
   polls input). Releasing on *any* draw let the draw of the *previous* redisplay release
   the next event too early; hence the 3-state flag.
+
+### How patch 5 (overlay scroll bars) works
+
+- **No room.** With the variable set, `pgtk_set_scroll_bar_default_width` makes the frame's
+  default scroll bar width 0 (and `pgtk_new_font` reserves 0 columns), so every layout
+  macro (`WINDOW_SCROLL_BAR_AREA_WIDTH` etc.) collapses without touching generic code,
+  while `WINDOW_HAS_VERTICAL_SCROLL_BAR` stays true so redisplay keeps calling
+  `set_vertical_scroll_bar`. A variable watcher removes all scroll bars (condemn + judge)
+  and resets each frame's `scroll-bar-width` parameter to nil, so switching takes
+  effect at once in every frame, and redisplay recreates the bars in the new style.
+- **Over the text.** `pgtk_set_vertical_scroll_bar` places the bar at
+  `WINDOW_BOX_RIGHT_EDGE_X - width` (theme width) and skips the `pgtk_clear_area` calls;
+  `xg_update_scrollbar_pos` skips clearing the old position, `gdk_window_lower` and
+  `SET_FRAME_GARBAGED` for overlay bars (the back buffer is always complete, so GTK just
+  redraws what the bar uncovers).
+- **Look.** The event box gets no window of its own (`gtk_event_box_set_visible_window
+  (FALSE)`) and no background; the scrollbar gets the `overlay-indicator` style class,
+  plus `hovering`/`dragging` while hovered or dragged, which the theme (Adwaita is built
+  into libgtk-3) styles as the thin indicator / wider slider of `GtkScrolledWindow`. The
+  arrow cursor isn't set, as it would go on the frame's window.
+- **Showing and hiding.** Shown when the thumb's value or range changes (the window
+  scrolled), and from `motion_notify_event` when the pointer is within 24 px of the bar
+  (`window_from_coordinates`). One second after the last activity it fades out in 10
+  steps of 20 ms (`gtk_widget_set_opacity`) and is then hidden, so it doesn't take clicks
+  meant for the text. Not while hovered or dragged. State per bar lives in GObject data
+  on the widget, freed with it.
+- **Tested:** screenshots of every state; `check-garbage.sh` with overlay bars on and
+  `VIBED_SETTLE=1.8` (so the indicator has faded before the screenshot); dragging the
+  slider with a virtual pointer scrolls the window; layout width 1864 → 1880 px; the
+  `scroll-bar` face color reaches the slider.
+- **Gotcha:** configs that disable scroll bars (Omarchy does, via `scroll-bar-mode -1`
+  and `default-frame-alist`) need `(scroll-bar-mode 1)` after that, or there is nothing
+  to overlay.
 
 ## Trying it without installing
 

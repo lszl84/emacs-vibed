@@ -1,7 +1,7 @@
 From 6a93926db560ba15a0e9a4d4dbb8fa4e6ba65a83 Mon Sep 17 00:00:00 2001
 From: luke <luke@devmindscape.com>
 Date: Sun, 27 Sep 2026 00:57:36 +0200
-Subject: [PATCH 2/4] Copy the back buffer to the screen instead of compositing
+Subject: [PATCH 2/5] Copy the back buffer to the screen instead of compositing
  it on PGTK
 
 * src/pgtkterm.c (pgtk_handle_draw): Paint an image back buffer with

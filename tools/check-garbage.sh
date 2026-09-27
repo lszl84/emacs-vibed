@@ -34,7 +34,7 @@ center() { hyprctl clients -j | jq -r ".[] | select(.pid==$EPID) | \"\(.at[0]+.s
 FAIL=0; N=0
 check() {  # NAME
   N=$((N+1)); local n=$(printf %02d $N)-$1
-  sleep 0.4; grim -g "$(geom)" $D/$n-a.png
+  sleep ${VIBED_SETTLE:-0.4}; grim -g "$(geom)" $D/$n-a.png
   EC "(redraw-frame)"; sleep 0.4; grim -g "$(geom)" $D/$n-b.png
   local ae=$(compare -metric AE $D/$n-a.png $D/$n-b.png $D/$n-diff.png 2>&1 | cut -d' ' -f1)
   if [ "$ae" != "0" ]; then FAIL=$((FAIL+1)); echo "FAIL $n: $ae px differ"; else echo "ok   $n"; rm -f $D/$n-diff.png; fi
