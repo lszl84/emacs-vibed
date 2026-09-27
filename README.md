@@ -14,8 +14,8 @@ intensive). The patches have not been sent upstream.
 
 [![Unpatched vs patched Emacs scrolling the same Org file on a 4K screen](media/scrolling-comparison.jpg)](media/scrolling-comparison.mp4)
 
-[Watch the video](media/scrolling-comparison.mp4) (13 s, 3840x2160 at 60 fps, 6.5 MB;
-GitHub plays it in the browser). It shows the same Org file (`etc/ORG-NEWS`) side by side
+[Watch the video](media/scrolling-comparison.mp4) (13 s, 1920x1080 at 60 fps, 3.4 MB;
+the [4K original](media/scrolling-comparison-4k.mp4) is 3840x2160 at 60 fps, 6.5 MB). It shows the same Org file (`etc/ORG-NEWS`) side by side
 on the 4K laptop panel, scrolled with the touchpad, `pixel-scroll-precision-mode` on in
 both. **Left:** the distribution's Emacs 31.1 (`emacs-wayland`, unpatched), in an
 emacsclient frame. **Right:** Emacs built with these patches and
