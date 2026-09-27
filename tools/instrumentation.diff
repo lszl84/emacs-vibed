@@ -1,0 +1,291 @@
+diff --git a/src/pgtkterm.c b/src/pgtkterm.c
+index d389027..5aa6929 100644
+--- a/src/pgtkterm.c
++++ b/src/pgtkterm.c
+@@ -67,6 +67,28 @@ Copyright (C) 1989, 1993-1994, 2005-2006, 2008-2026 Free Software
+ 
+ #ifdef GDK_WINDOWING_WAYLAND
+ #include <gdk/gdkwayland.h>
++
++/* VIBED instrumentation (measurement only, not part of the patch).  */
++#include <time.h>
++static double vibed_now (void)
++{
++  struct timespec ts; clock_gettime (CLOCK_REALTIME, &ts);
++  return ts.tv_sec + ts.tv_nsec * 1e-9;
++}
++static struct {
++  long updates, copies, uptodate, draws, surftype;
++  double t_update, t_copy, t_draw, draw_area, upd_t0;
++  double draw_times[16384]; long ndt;
++  double tl_time[65536]; char tl_type[65536]; long ntl;
++} vibed_st;
++static void vibed_tl (char type)
++{
++  if (vibed_st.ntl < 65536)
++    {
++      vibed_st.tl_time[vibed_st.ntl] = vibed_now ();
++      vibed_st.tl_type[vibed_st.ntl++] = type;
++    }
++}
+ #endif
+ 
+ #define FRAME_CR_CONTEXT(f)		((f)->output_data.pgtk->cr_context)
+@@ -3344,9 +3366,15 @@ pgtk_copy_bits (struct frame *f, cairo_rectangle_t *src_rect,
+ {
+   cairo_t *cr;
+   cairo_surface_t *surface;	/* temporary surface */
++  double vibed_t0 = vibed_now ();
++  vibed_st.surftype = cairo_surface_get_type (FRAME_CR_SURFACE (f));
+ 
+   if (pgtk_copy_bits_in_place (f, src_rect, dst_rect))
+-    return;
++    {
++      vibed_st.copies++;
++      vibed_st.t_copy += vibed_now () - vibed_t0;
++      return;
++    }
+ 
+   surface
+     = cairo_surface_create_similar (FRAME_CR_SURFACE (f),
+@@ -3372,6 +3400,8 @@ pgtk_copy_bits (struct frame *f, cairo_rectangle_t *src_rect,
+   pgtk_end_cr_clip (f);
+ 
+   cairo_surface_destroy (surface);
++  vibed_st.copies++;
++  vibed_st.t_copy += vibed_now () - vibed_t0;
+ }
+ 
+ /* Scroll part of the display as described by RUN.  */
+@@ -3609,6 +3639,8 @@ pgtk_text_icon (struct frame *f, const char *icon_name)
+ static void
+ pgtk_update_begin (struct frame *f)
+ {
++  vibed_st.upd_t0 = vibed_now ();
++  vibed_tl ('B');
+   pgtk_clear_under_internal_border (f);
+ }
+ 
+@@ -3704,6 +3736,12 @@ pgtk_update_end (struct frame *f)
+ {
+   /* Mouse highlight may be displayed again.  */
+   MOUSE_HL_INFO (f)->mouse_face_defer = false;
++  if (vibed_st.upd_t0)
++    {
++      vibed_st.updates++;
++      vibed_st.t_update += vibed_now () - vibed_st.upd_t0;
++      vibed_st.upd_t0 = 0;
++    }
+ }
+ 
+ static void
+@@ -3711,6 +3749,8 @@ pgtk_frame_up_to_date (struct frame *f)
+ {
+   block_input ();
+   FRAME_MOUSE_UPDATE (f);
++  vibed_st.uptodate++;
++  vibed_tl ('U');
+   if (!buffer_flipping_blocked_p ())
+     {
+       flip_cr_context (f);
+@@ -5350,12 +5390,23 @@ pgtk_clear_under_internal_border (struct frame *f)
+     }
+ }
+ 
++static void vibed_fc_paint (GdkFrameClock *c, gpointer d) { vibed_tl ('P'); }
++static void vibed_fc_flush (GdkFrameClock *c, gpointer d) { vibed_tl ('F'); }
++
+ static gboolean
+ pgtk_handle_draw (GtkWidget *widget, cairo_t *cr, gpointer *data)
+ {
+   struct frame *f;
+ 
+   GdkWindow *win = gtk_widget_get_window (widget);
++  static GdkFrameClock *vibed_fc;
++  vibed_tl ('d');
++  if (vibed_fc != gtk_widget_get_frame_clock (widget))
++    {
++      vibed_fc = gtk_widget_get_frame_clock (widget);
++      g_signal_connect (vibed_fc, "paint", G_CALLBACK (vibed_fc_paint), NULL);
++      g_signal_connect (vibed_fc, "flush-events", G_CALLBACK (vibed_fc_flush), NULL);
++    }
+ 
+   if (win != NULL)
+     {
+@@ -5372,6 +5423,8 @@ pgtk_handle_draw (GtkWidget *widget, cairo_t *cr, gpointer *data)
+ 	}
+       if (src != NULL)
+ 	{
++	  double vibed_t0 = vibed_now (), x1, y1, x2, y2;
++	  cairo_clip_extents (cr, &x1, &y1, &x2, &y2);
+ 	  cairo_save (cr);
+ 	  if (cairo_surface_get_type (src) == CAIRO_SURFACE_TYPE_IMAGE)
+ 	    {
+@@ -5392,6 +5445,12 @@ pgtk_handle_draw (GtkWidget *widget, cairo_t *cr, gpointer *data)
+ 	  cairo_set_source_surface (cr, src, 0, 0);
+ 	  cairo_paint (cr);
+ 	  cairo_restore (cr);
++	  vibed_st.draws++;
++	  vibed_tl ('D');
++	  vibed_st.draw_area += (x2 - x1) * (y2 - y1);
++	  vibed_st.t_draw += vibed_now () - vibed_t0;
++	  if (vibed_st.ndt < 16384)
++	    vibed_st.draw_times[vibed_st.ndt++] = vibed_t0;
+ 	}
+     }
+   return FALSE;
+@@ -6519,6 +6578,7 @@ scroll_event (GtkWidget *widget, GdkEvent *event, gpointer *user_data)
+ 
+   frame = pgtk_any_window_to_frame (gtk_widget_get_window (widget));
+   dpyinfo = FRAME_DISPLAY_INFO (frame);
++  vibed_tl ('S');
+ 
+   if (gui_mouse_grabbed (dpyinfo))
+     f = dpyinfo->last_mouse_frame;
+@@ -7749,9 +7809,146 @@ pgtk_clear_area (struct frame *f, int x, int y, int width, int height)
+ }
+ 
+ 
++/* VIBED synthetic touchpad: inject GDK smooth scroll events at a fixed
++   rate, catching up in bursts when Emacs was busy (like events queued
++   in the Wayland socket).  Segments: list of (DELTA-Y SECONDS), where
++   DELTA-Y 0 means a pause.  A scroll-stop event ends each segment.  */
++static struct {
++  GtkWidget *widget; GdkDevice *device, *source;
++  double rate, start, seg_start; long sent; guint id;
++  double segs[64][2]; int nsegs, seg; double ends[64]; int nends;
++} vibed_inj;
++
++static void
++vibed_put_scroll (double dy, bool stop)
++{
++  GdkEvent *ev = gdk_event_new (GDK_SCROLL);
++  GdkWindow *win = gtk_widget_get_window (vibed_inj.widget);
++  ev->scroll.window = g_object_ref (win);
++  ev->scroll.send_event = FALSE;
++  ev->scroll.time = (guint32) (vibed_now () * 1000);
++  ev->scroll.x = gtk_widget_get_allocated_width (vibed_inj.widget) / 2;
++  ev->scroll.y = gtk_widget_get_allocated_height (vibed_inj.widget) / 2;
++  ev->scroll.direction = GDK_SCROLL_SMOOTH;
++  ev->scroll.delta_x = 0;
++  ev->scroll.delta_y = dy;
++  ev->scroll.is_stop = stop;
++  gdk_event_set_device (ev, vibed_inj.device);
++  gdk_event_set_source_device (ev, vibed_inj.source);
++  gdk_display_put_event (gdk_window_get_display (win), ev);
++  gdk_event_free (ev);
++}
++
++static gboolean
++vibed_inject_tick (gpointer data)
++{
++  double now = vibed_now ();
++  while (vibed_inj.seg < vibed_inj.nsegs)
++    {
++      double dy = vibed_inj.segs[vibed_inj.seg][0];
++      double dur = vibed_inj.segs[vibed_inj.seg][1];
++      double seg_end = vibed_inj.seg_start + dur;
++      long due = (long) ((MIN (now, seg_end) - vibed_inj.seg_start)
++			 * vibed_inj.rate);
++      if (dy != 0)
++	for (; vibed_inj.sent < due; vibed_inj.sent++)
++	  vibed_put_scroll (dy, false);
++      if (now < seg_end)
++	return G_SOURCE_CONTINUE;
++      if (dy != 0)
++	{
++	  vibed_put_scroll (0, true);
++	  vibed_inj.ends[vibed_inj.nends++] = seg_end;
++	}
++      vibed_inj.seg++;
++      vibed_inj.sent = 0;
++      vibed_inj.seg_start = seg_end;
++    }
++  vibed_inj.id = 0;
++  return G_SOURCE_REMOVE;
++}
++
++DEFUN ("vibed-inject-scroll", Fvibed_inject_scroll, Svibed_inject_scroll, 2, 2, 0,
++       doc: /* Inject synthetic touchpad scrolling at RATE Hz; SEGS is ((DY SECS)...).
++With RATE nil, return the list of segment end times and whether done.  */)
++  (Lisp_Object rate, Lisp_Object segs)
++{
++  if (NILP (rate))
++    {
++      Lisp_Object r = Qnil;
++      for (int i = vibed_inj.nends - 1; i >= 0; i--)
++	r = Fcons (make_float (vibed_inj.ends[i]), r);
++      return Fcons (vibed_inj.id ? Qnil : Qt, r);
++    }
++  struct frame *f = SELECTED_FRAME ();
++  vibed_inj.widget = FRAME_GTK_WIDGET (f);
++  GdkSeat *seat = gdk_display_get_default_seat (gtk_widget_get_display (vibed_inj.widget));
++  vibed_inj.device = gdk_seat_get_pointer (seat);
++  vibed_inj.source = vibed_inj.device;
++  GList *slaves = gdk_seat_get_slaves (seat, GDK_SEAT_CAPABILITY_ALL_POINTING);
++  for (GList *l = slaves; l; l = l->next)
++    if (gdk_device_get_source (l->data) == GDK_SOURCE_TOUCHPAD)
++      vibed_inj.source = l->data;
++  g_list_free (slaves);
++  vibed_inj.rate = XFLOATINT (rate);
++  vibed_inj.nsegs = 0;
++  for (Lisp_Object t = segs; CONSP (t) && vibed_inj.nsegs < 64; t = XCDR (t))
++    {
++      vibed_inj.segs[vibed_inj.nsegs][0] = XFLOATINT (XCAR (XCAR (t)));
++      vibed_inj.segs[vibed_inj.nsegs][1] = XFLOATINT (XCAR (XCDR (XCAR (t))));
++      vibed_inj.nsegs++;
++    }
++  vibed_inj.seg = 0; vibed_inj.sent = 0; vibed_inj.nends = 0;
++  vibed_inj.seg_start = vibed_now ();
++  if (!vibed_inj.id)
++    vibed_inj.id = g_timeout_add (1, vibed_inject_tick, NULL);
++  return build_string (gdk_device_get_name (vibed_inj.source));
++}
++
++DEFUN ("vibed-stats", Fvibed_stats, Svibed_stats, 0, 1, 0,
++       doc: /* Return VIBED instrumentation counters; reset them if RESET.  */)
++  (Lisp_Object reset)
++{
++  Lisp_Object times = make_nil_vector (vibed_st.ndt);
++  Lisp_Object tl = make_nil_vector (vibed_st.ntl);
++  for (long i = 0; i < vibed_st.ntl; i++)
++    ASET (tl, i, Fcons (make_float (vibed_st.tl_time[i]),
++			make_fixnum (vibed_st.tl_type[i])));
++  for (long i = 0; i < vibed_st.ndt; i++)
++    ASET (times, i, make_float (vibed_st.draw_times[i]));
++  Lisp_Object r
++    = list (QCvibed_updates, make_fixnum (vibed_st.updates),
++	    QCvibed_update_ms, make_float (vibed_st.t_update * 1000),
++	    QCvibed_copies, make_fixnum (vibed_st.copies),
++	    QCvibed_copy_ms, make_float (vibed_st.t_copy * 1000),
++	    QCvibed_uptodate, make_fixnum (vibed_st.uptodate),
++	    QCvibed_draws, make_fixnum (vibed_st.draws),
++	    QCvibed_draw_ms, make_float (vibed_st.t_draw * 1000),
++	    QCvibed_draw_area, make_float (vibed_st.draw_area),
++	    QCvibed_surftype, make_fixnum (vibed_st.surftype),
++	    QCvibed_draw_times, times,
++	    QCvibed_timeline, tl);
++  if (!NILP (reset))
++    memset (&vibed_st, 0, sizeof vibed_st);
++  return r;
++}
++
+ void
+ syms_of_pgtkterm (void)
+ {
++  DEFSYM (QCvibed_updates, ":updates");
++  DEFSYM (QCvibed_update_ms, ":update-ms");
++  DEFSYM (QCvibed_copies, ":copies");
++  DEFSYM (QCvibed_copy_ms, ":copy-ms");
++  DEFSYM (QCvibed_uptodate, ":uptodate");
++  DEFSYM (QCvibed_draws, ":draws");
++  DEFSYM (QCvibed_draw_ms, ":draw-ms");
++  DEFSYM (QCvibed_draw_area, ":draw-area");
++  DEFSYM (QCvibed_surftype, ":surftype");
++  DEFSYM (QCvibed_draw_times, ":draw-times");
++  DEFSYM (QCvibed_timeline, ":timeline");
++  defsubr (&Svibed_stats);
++  defsubr (&Svibed_inject_scroll);
+   DEFSYM (Qmodifier_value, "modifier-value");
+   DEFSYM (Qalt, "alt");
+   DEFSYM (Qhyper, "hyper");

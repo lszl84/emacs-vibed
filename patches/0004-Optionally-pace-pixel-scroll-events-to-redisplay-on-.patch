@@ -1,0 +1,283 @@
+From e5e1bfc7caca6df50908609cedd14f91f1b6ddfd Mon Sep 17 00:00:00 2001
+From: luke <luke@devmindscape.com>
+Date: Sun, 27 Sep 2026 01:46:17 +0200
+Subject: [PATCH 4/4] Optionally pace pixel scroll events to redisplay on PGTK
+
+A touchpad sends pixel scroll events about 170 times a second.  With a
+large frame on a high-resolution screen, Emacs cannot handle them one
+by one: every event runs a command followed by a redisplay, events
+queue up, and scrolling lags and stutters, especially upwards, where
+the command itself is slower.
+
+When the new variable 'pgtk-pace-scroll-events' is non-nil, merge
+pixel scroll events that arrive before the previous one has been
+redisplayed and drawn by GTK into one event, so that Emacs redisplays
+at most once per frame drawn.
+
+* src/pgtkterm.h (struct pgtk_output): New member 'scroll_pending'.
+* src/pgtkterm.c (pgtk_release_scroll_events)
+(evq_pixel_scroll_event_p, evq_merge_scroll_event, evq_hold_timeout)
+(evq_hold_last_event_p): New functions.
+(evq_hold_timer, evq_hold_expired): New variables.
+(pgtk_queue_draw_damage, pgtk_handle_draw): Let held pixel scroll
+events through once the frame has been redisplayed and drawn.
+(evq_flush): Hold back a pixel scroll event at the end of the queue
+while its frame is busy.
+(scroll_event): Merge pixel scroll events.
+(syms_of_pgtkterm) <pgtk-pace-scroll-events>: New variable.
+* etc/NEWS: Announce it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ etc/NEWS       |   8 +++
+ src/pgtkterm.c | 154 ++++++++++++++++++++++++++++++++++++++++++++++++-
+ src/pgtkterm.h |   8 +++
+ 3 files changed, 168 insertions(+), 2 deletions(-)
+
+diff --git a/etc/NEWS b/etc/NEWS
+index 448227b..f8ff6c4 100644
+--- a/etc/NEWS
++++ b/etc/NEWS
+@@ -24,6 +24,14 @@ with a prefix argument or by typing 'C-u C-h C-n'.
+ 
+ * Changes in Emacs 31.2
+ 
++---
++** New variable 'pgtk-pace-scroll-events'.
++When non-nil, PGTK frames merge pixel scroll events, such as those a
++touchpad sends in 'pixel-scroll-precision-mode', that arrive before the
++previous one has been redisplayed and drawn.  This makes touchpad
++scrolling smoother in large frames on high-resolution screens, where
++Emacs cannot redisplay as often as the touchpad sends events.
++
+ 
+ * Editing Changes in Emacs 31.2
+ 
+diff --git a/src/pgtkterm.c b/src/pgtkterm.c
+index 5d6f209..d389027 100644
+--- a/src/pgtkterm.c
++++ b/src/pgtkterm.c
+@@ -308,6 +308,16 @@ pgtk_add_damage (struct frame *f, double x, double y,
+     output->cr_damage = cairo_region_create_rectangle (&rect);
+ }
+ 
++/* Let pixel scroll events for F through again; see evq_flush.  */
++
++static void
++pgtk_release_scroll_events (struct frame *f)
++{
++  FRAME_X_OUTPUT (f)->scroll_pending = SCROLL_PENDING_NONE;
++  if (event_q.nr > 0)
++    raise (SIGIO);
++}
++
+ /* Ask GTK to copy the parts of the back buffer of F drawn since the
+    last call to the screen, instead of all of it.  */
+ 
+@@ -316,6 +326,17 @@ pgtk_queue_draw_damage (struct frame *f)
+ {
+   struct pgtk_output *output = FRAME_X_OUTPUT (f);
+ 
++  /* F has been redisplayed after a pixel scroll event.  If there is
++     nothing to draw, let the next one through now, otherwise once GTK
++     has drawn the frame.  */
++  if (output->scroll_pending == SCROLL_PENDING_REDISPLAY)
++    {
++      if (output->cr_damage_all || output->cr_damage)
++	output->scroll_pending = SCROLL_PENDING_DRAW;
++      else
++	pgtk_release_scroll_events (f);
++    }
++
+   if (output->cr_damage_all)
+     gtk_widget_queue_draw (FRAME_GTK_WIDGET (f));
+   else if (output->cr_damage)
+@@ -374,13 +395,126 @@ evq_enqueue (union buffered_input_event *ev)
+   raise (SIGIO);
+ }
+ 
++/* Return true if EV is a pixel scroll event, i.e. a wheel event whose
++   ARG is (nil DX DY).  */
++
++static bool
++evq_pixel_scroll_event_p (struct input_event *ev)
++{
++  return ((ev->kind == WHEEL_EVENT || ev->kind == HORIZ_WHEEL_EVENT)
++	  && CONSP (ev->arg) && NILP (XCAR (ev->arg)));
++}
++
++/* If the last event in the queue is a pixel scroll event for the same
++   frame and device as the pixel scroll event EV, with the same
++   modifiers, add the deltas of EV to it and return true.  */
++
++static bool
++evq_merge_scroll_event (struct input_event *ev)
++{
++  struct event_queue_t *evq = &event_q;
++  struct input_event *last;
++  int directions = up_modifier | down_modifier;
++  double dx, dy;
++
++  if (!pgtk_pace_scroll_events || evq->nr == 0)
++    return false;
++
++  last = &evq->q[evq->nr - 1].ie;
++  if (!evq_pixel_scroll_event_p (last)
++      || !evq_pixel_scroll_event_p (ev)
++      || !EQ (last->frame_or_window, ev->frame_or_window)
++      || !EQ (last->device, ev->device)
++      || (last->modifiers & ~directions) != (ev->modifiers & ~directions))
++    return false;
++
++  dx = XFLOAT_DATA (XCAR (XCDR (last->arg))) + XFLOAT_DATA (XCAR (XCDR (ev->arg)));
++  dy = (XFLOAT_DATA (XCAR (XCDR (XCDR (last->arg))))
++	+ XFLOAT_DATA (XCAR (XCDR (XCDR (ev->arg)))));
++
++  /* DX and DY have the opposite sign of the GDK deltas; choose the
++     kind and direction like scroll_event does.  */
++  last->kind = fabs (dx) > fabs (dy) ? HORIZ_WHEEL_EVENT : WHEEL_EVENT;
++  last->modifiers &= ~directions;
++  last->modifiers |= (last->kind == HORIZ_WHEEL_EVENT
++		      ? (dx <= 0 ? up_modifier : down_modifier)
++		      : (dy <= 0 ? down_modifier : up_modifier));
++  last->arg = list3 (Qnil, make_float (dx), make_float (dy));
++  last->x = ev->x;
++  last->y = ev->y;
++  last->timestamp = ev->timestamp;
++  return true;
++}
++
++/* Timer that stops a pixel scroll event from being held back for
++   long, e.g. if its frame is not visible, and whether it fired.  */
++static guint evq_hold_timer;
++static bool evq_hold_expired;
++
++static gboolean
++evq_hold_timeout (gpointer data)
++{
++  evq_hold_timer = 0;
++  evq_hold_expired = true;
++  raise (SIGIO);
++  return G_SOURCE_REMOVE;
++}
++
++/* Return true if the event at the end of the queue should stay there
++   for now.  That is the case for a pixel scroll event whose frame is
++   still busy with the previous one, i.e. the command handling it has
++   not run yet, or the frame hasn't been redisplayed and drawn by GTK
++   since.  Handling it then would make Emacs redisplay again, and that
++   work would be thrown away when GTK draws the frame.  Pixel scroll
++   events arriving in the meantime are merged into it.  */
++
++static bool
++evq_hold_last_event_p (void)
++{
++  struct event_queue_t *evq = &event_q;
++  struct input_event *last;
++  struct frame *f;
++  bool hold = false;
++
++  if (pgtk_pace_scroll_events && evq->nr > 0)
++    {
++      last = &evq->q[evq->nr - 1].ie;
++      if (evq_pixel_scroll_event_p (last) && FRAMEP (last->frame_or_window))
++	{
++	  f = XFRAME (last->frame_or_window);
++	  if (FRAME_LIVE_P (f) && FRAME_PGTK_P (f))
++	    {
++	      hold = (FRAME_X_OUTPUT (f)->scroll_pending != SCROLL_PENDING_NONE
++		      && !evq_hold_expired);
++	      /* The event will be handled now; hold back the next one
++		 until the frame has been redisplayed and drawn.  */
++	      if (!hold)
++		FRAME_X_OUTPUT (f)->scroll_pending = SCROLL_PENDING_REDISPLAY;
++	    }
++	}
++    }
++
++  if (!hold)
++    {
++      if (evq_hold_timer)
++	g_source_remove (evq_hold_timer);
++      evq_hold_timer = 0;
++      evq_hold_expired = false;
++    }
++  else if (!evq_hold_timer)
++    evq_hold_timer = g_timeout_add (50, evq_hold_timeout, NULL);
++
++  return hold;
++}
++
+ static int
+ evq_flush (struct input_event *hold_quit)
+ {
+   struct event_queue_t *evq = &event_q;
+   int n = 0;
++  bool hold = evq_hold_last_event_p ();
+ 
+-  while (evq->nr > 0)
++  while (evq->nr > hold)
+     {
+       /* kbd_buffer_store_buffered_event may do longjmp, so
+ 	 we need to shift event queue first and pass the event
+@@ -5229,6 +5363,9 @@ pgtk_handle_draw (GtkWidget *widget, cairo_t *cr, gpointer *data)
+       f = pgtk_any_window_to_frame (win);
+       if (f != NULL)
+ 	{
++	  if (FRAME_X_OUTPUT (f)->scroll_pending == SCROLL_PENDING_DRAW)
++	    pgtk_release_scroll_events (f);
++
+ 	  src = FRAME_X_OUTPUT (f)->cr_surface_visible_bell;
+ 	  if (src == NULL && FRAME_CR_ACTIVE_CONTEXT (f) != NULL)
+ 	    src = cairo_get_target (FRAME_CR_ACTIVE_CONTEXT (f));
+@@ -6498,7 +6635,8 @@ scroll_event (GtkWidget *widget, GdkEvent *event, gpointer *user_data)
+     {
+       inev.ie.device
+ 	= pgtk_get_device_for_event (FRAME_DISPLAY_INFO (f), event);
+-      evq_enqueue (&inev);
++      if (!evq_merge_scroll_event (&inev.ie))
++	evq_enqueue (&inev);
+     }
+   return TRUE;
+ }
+@@ -7696,6 +7834,18 @@ syms_of_pgtkterm (void)
+     doc: /* Hash table of character codes indexed by X keysym codes.  */);
+   Vpgtk_keysym_table = make_hash_table (&hashtest_eql, 900, Weak_None);
+ 
++  DEFVAR_BOOL ("pgtk-pace-scroll-events", pgtk_pace_scroll_events,
++    doc: /* Non-nil means handle pixel scroll events at the pace of redisplay.
++A touchpad sends pixel scroll events much faster than Emacs can
++redisplay a large frame on a high-resolution screen.  Normally, each
++event is handled by a separate command, the events queue up, and
++scrolling lags behind.  If this is non-nil, pixel scroll events that
++arrive while Emacs is busy, or while the frame is waiting to be drawn,
++are combined into one event, whose deltas are their sum.  This affects
++only the events produced when `mwheel-coalesce-scroll-events' is nil,
++e.g. by `pixel-scroll-precision-mode'.  */);
++  pgtk_pace_scroll_events = false;
++
+   window_being_scrolled = Qnil;
+   staticpro (&window_being_scrolled);
+ 
+diff --git a/src/pgtkterm.h b/src/pgtkterm.h
+index 861b857..6d4ec24 100644
+--- a/src/pgtkterm.h
++++ b/src/pgtkterm.h
+@@ -423,6 +423,14 @@ #define BLUE_FROM_ULONG(color)	((color) & 0xff)
+   cairo_region_t *cr_damage;
+   /* True if all of the back buffer must be queued for display.  */
+   bool cr_damage_all;
++  /* Where the last pixel scroll event handed to Emacs for this frame
++     is, if pgtk-pace-scroll-events is non-nil.  */
++  enum
++  {
++    SCROLL_PENDING_NONE,	/* Done, or there was none.  */
++    SCROLL_PENDING_REDISPLAY,	/* Waiting for redisplay.  */
++    SCROLL_PENDING_DRAW,	/* Waiting for GTK to draw the frame.  */
++  } scroll_pending;
+ #endif
+   struct atimer *atimer_visible_bell;
+ 
+-- 
+2.55.0
+

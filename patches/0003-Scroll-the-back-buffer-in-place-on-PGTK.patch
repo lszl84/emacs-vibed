@@ -1,0 +1,107 @@
+From 408929d7080806b3bd76aa5fe1380d26961bb54d Mon Sep 17 00:00:00 2001
+From: luke <luke@devmindscape.com>
+Date: Sun, 27 Sep 2026 01:02:15 +0200
+Subject: [PATCH 3/4] Scroll the back buffer in place on PGTK
+
+pgtk_copy_bits copied the scrolled area into a temporary surface and
+back, which at 4K moves about 60 MB per scroll step.
+
+* src/pgtkterm.c (pgtk_copy_bits_in_place): New function.
+(pgtk_copy_bits): Use it when the back buffer is an image surface.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pgtkterm.c | 70 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 70 insertions(+)
+
+diff --git a/src/pgtkterm.c b/src/pgtkterm.c
+index fb6d689..5d6f209 100644
+--- a/src/pgtkterm.c
++++ b/src/pgtkterm.c
+@@ -3137,6 +3137,73 @@ pgtk_draw_window_cursor (struct window *w, struct glyph_row *glyph_row, int x,
+ 
+ }
+ 
++/* Copy SRC_RECT of the back buffer of F to DST_RECT, which must have
++   the same size, by moving its pixels in memory.  Return false and do
++   nothing if the back buffer isn't an image surface that can be
++   modified this way.  */
++
++static bool
++pgtk_copy_bits_in_place (struct frame *f, cairo_rectangle_t *src_rect,
++			 cairo_rectangle_t *dst_rect)
++{
++  cairo_surface_t *surface = FRAME_CR_SURFACE (f);
++  double sx, sy, ox, oy, from_x, from_y, to_x, to_y, width, height;
++  int surface_width, surface_height, stride, row_bytes, y;
++  unsigned char *data, *from, *to;
++
++  if (cairo_surface_get_type (surface) != CAIRO_SURFACE_TYPE_IMAGE
++      || (cairo_image_surface_get_format (surface) != CAIRO_FORMAT_ARGB32
++	  && cairo_image_surface_get_format (surface) != CAIRO_FORMAT_RGB24)
++      || src_rect->width != dst_rect->width
++      || src_rect->height != dst_rect->height)
++    return false;
++
++  /* Convert the rectangles to pixels of the image.  */
++  cairo_surface_get_device_scale (surface, &sx, &sy);
++  cairo_surface_get_device_offset (surface, &ox, &oy);
++  from_x = src_rect->x * sx + ox;
++  from_y = src_rect->y * sy + oy;
++  to_x = dst_rect->x * sx + ox;
++  to_y = dst_rect->y * sy + oy;
++  width = src_rect->width * sx;
++  height = src_rect->height * sy;
++  surface_width = cairo_image_surface_get_width (surface);
++  surface_height = cairo_image_surface_get_height (surface);
++
++  if (from_x != (int) from_x || from_y != (int) from_y
++      || to_x != (int) to_x || to_y != (int) to_y
++      || width != (int) width || height != (int) height
++      || from_x < 0 || from_y < 0 || to_x < 0 || to_y < 0
++      || width <= 0 || height <= 0
++      || max (from_x, to_x) + width > surface_width
++      || max (from_y, to_y) + height > surface_height)
++    return false;
++
++  cairo_surface_flush (surface);
++  data = cairo_image_surface_get_data (surface);
++  if (!data)
++    return false;
++
++  stride = cairo_image_surface_get_stride (surface);
++  row_bytes = width * 4;
++  from = data + (int) from_y * stride + (int) from_x * 4;
++  to = data + (int) to_y * stride + (int) to_x * 4;
++
++  /* Move the rows in an order that doesn't overwrite rows not yet
++     moved.  */
++  if (to_y <= from_y)
++    for (y = 0; y < height; y++)
++      memmove (to + y * stride, from + y * stride, row_bytes);
++  else
++    for (y = height - 1; y >= 0; y--)
++      memmove (to + y * stride, from + y * stride, row_bytes);
++
++  cairo_surface_mark_dirty_rectangle (surface, to_x, to_y, width, height);
++  pgtk_add_damage (f, dst_rect->x, dst_rect->y,
++		   dst_rect->width, dst_rect->height);
++  return true;
++}
++
+ static void
+ pgtk_copy_bits (struct frame *f, cairo_rectangle_t *src_rect,
+ 		cairo_rectangle_t *dst_rect)
+@@ -3144,6 +3211,9 @@ pgtk_copy_bits (struct frame *f, cairo_rectangle_t *src_rect,
+   cairo_t *cr;
+   cairo_surface_t *surface;	/* temporary surface */
+ 
++  if (pgtk_copy_bits_in_place (f, src_rect, dst_rect))
++    return;
++
+   surface
+     = cairo_surface_create_similar (FRAME_CR_SURFACE (f),
+ 				    CAIRO_CONTENT_COLOR_ALPHA,
+-- 
+2.55.0
+

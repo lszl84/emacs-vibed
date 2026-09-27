@@ -1,0 +1,7 @@
+# Emacs source trees (clones/worktrees of emacs-31; the changes are in patches/)
+/emacs/
+/emacs-base/
+/emacs-clean/
+# Built tool binaries
+/tools/ptraceable
+/tools/vscroll/vscroll

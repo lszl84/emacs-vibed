@@ -1,0 +1,200 @@
+From 77a8a1abf05858ad61bed7fca890f4e2a122457d Mon Sep 17 00:00:00 2001
+From: luke <luke@devmindscape.com>
+Date: Sun, 27 Sep 2026 00:55:51 +0200
+Subject: [PATCH 1/4] Copy only the damaged part of the back buffer to the
+ screen on PGTK
+
+After every redisplay, PGTK invalidated the whole frame widget, so
+GTK cleared, repainted and composited the entire frame even when only
+the cursor or a single line had changed.  At 4K this costs several
+milliseconds per update.  Track the area drawn since the last flip
+and only invalidate that.
+
+* src/pgtkterm.h (struct pgtk_output): New members 'cr_damage' and
+'cr_damage_all'.
+* src/pgtkterm.c (flip_cr_context): Mark the whole frame damaged when
+a new back buffer becomes active.
+(pgtk_add_damage, pgtk_queue_draw_damage): New functions.
+(pgtk_end_cr_clip): Record the clip extents as damage.
+(pgtk_fill_rectangle, pgtk_draw_rectangle, pgtk_clear_area): Clip to
+the rectangle drawn, so that only it is recorded as damage.
+(pgtk_frame_up_to_date, pgtk_buffer_flipping_unblocked_hook): Use
+pgtk_queue_draw_damage instead of gtk_widget_queue_draw.
+(recover_from_visible_bell, pgtk_flash): Mark the whole frame damaged.
+(pgtk_free_frame_resources): Free the damage region.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pgtkterm.c | 72 +++++++++++++++++++++++++++++++++++++++++++++++---
+ src/pgtkterm.h |  5 ++++
+ 2 files changed, 74 insertions(+), 3 deletions(-)
+
+diff --git a/src/pgtkterm.c b/src/pgtkterm.c
+index 733c7d2..6c3d2eb 100644
+--- a/src/pgtkterm.c
++++ b/src/pgtkterm.c
+@@ -279,10 +279,56 @@ flip_cr_context (struct frame *f)
+ 
+       FRAME_CR_ACTIVE_CONTEXT (f)
+ 	= cairo_reference (FRAME_CR_CONTEXT (f));
++      FRAME_X_OUTPUT (f)->cr_damage_all = true;
+     }
+   unblock_input ();
+ }
+ 
++/* Record that the rectangle X, Y, WIDTH, HEIGHT of the back buffer of
++   F has been drawn to and must be copied to the screen.  */
++
++static void
++pgtk_add_damage (struct frame *f, double x, double y,
++		 double width, double height)
++{
++  struct pgtk_output *output = FRAME_X_OUTPUT (f);
++  cairo_rectangle_int_t rect;
++
++  if (output->cr_damage_all || width <= 0 || height <= 0)
++    return;
++
++  rect.x = floor (x);
++  rect.y = floor (y);
++  rect.width = ceil (x + width) - rect.x;
++  rect.height = ceil (y + height) - rect.y;
++
++  if (output->cr_damage)
++    cairo_region_union_rectangle (output->cr_damage, &rect);
++  else
++    output->cr_damage = cairo_region_create_rectangle (&rect);
++}
++
++/* Ask GTK to copy the parts of the back buffer of F drawn since the
++   last call to the screen, instead of all of it.  */
++
++static void
++pgtk_queue_draw_damage (struct frame *f)
++{
++  struct pgtk_output *output = FRAME_X_OUTPUT (f);
++
++  if (output->cr_damage_all)
++    gtk_widget_queue_draw (FRAME_GTK_WIDGET (f));
++  else if (output->cr_damage)
++    gtk_widget_queue_draw_region (FRAME_GTK_WIDGET (f), output->cr_damage);
++
++  if (output->cr_damage)
++    {
++      cairo_region_destroy (output->cr_damage);
++      output->cr_damage = NULL;
++    }
++  output->cr_damage_all = false;
++}
++
+ 
+ static void
+ evq_enqueue (union buffered_input_event *ev)
+@@ -584,6 +630,12 @@ #define CLEAR_IF_EQ(FIELD)	\
+       FRAME_X_OUTPUT (f)->cr_surface_visible_bell = NULL;
+     }
+ 
++  if (FRAME_X_OUTPUT (f)->cr_damage != NULL)
++    {
++      cairo_region_destroy (FRAME_X_OUTPUT (f)->cr_damage);
++      FRAME_X_OUTPUT (f)->cr_damage = NULL;
++    }
++
+   if (FRAME_X_OUTPUT (f)->atimer_visible_bell != NULL)
+     {
+       cancel_atimer (FRAME_X_OUTPUT (f)->atimer_visible_bell);
+@@ -1437,6 +1489,8 @@ pgtk_draw_rectangle (struct frame *f, unsigned long color, int x, int y,
+ 
+   cr = pgtk_begin_cr_clip (f);
+   pgtk_set_cr_source_with_color (f, color, respect_alpha_background);
++  cairo_rectangle (cr, x, y, width + 1, height + 1);
++  cairo_clip (cr);
+   cairo_rectangle (cr, x + 0.5, y + 0.5, width, height);
+   cairo_set_line_width (cr, 1);
+   cairo_stroke (cr);
+@@ -3456,7 +3510,7 @@ pgtk_frame_up_to_date (struct frame *f)
+   if (!buffer_flipping_blocked_p ())
+     {
+       flip_cr_context (f);
+-      gtk_widget_queue_draw (FRAME_GTK_WIDGET (f));
++      pgtk_queue_draw_damage (f);
+     }
+   unblock_input ();
+ }
+@@ -3803,6 +3857,7 @@ recover_from_visible_bell (struct atimer *timer)
+     {
+       cairo_surface_destroy (FRAME_X_OUTPUT (f)->cr_surface_visible_bell);
+       FRAME_X_OUTPUT (f)->cr_surface_visible_bell = NULL;
++      FRAME_X_OUTPUT (f)->cr_damage_all = true;
+     }
+ 
+   if (FRAME_X_OUTPUT (f)->atimer_visible_bell != NULL)
+@@ -3884,6 +3939,7 @@ pgtk_flash (struct frame *f)
+   if (FRAME_X_OUTPUT (f)->cr_surface_visible_bell)
+     cairo_surface_destroy (FRAME_X_OUTPUT (f)->cr_surface_visible_bell);
+   FRAME_X_OUTPUT (f)->cr_surface_visible_bell = surface;
++  FRAME_X_OUTPUT (f)->cr_damage_all = true;
+ 
+   delay = make_timespec (0, 50 * 1000 * 1000);
+ 
+@@ -4859,7 +4915,7 @@ pgtk_buffer_flipping_unblocked_hook (struct frame *f)
+ {
+   block_input ();
+   flip_cr_context (f);
+-  gtk_widget_queue_draw (FRAME_GTK_WIDGET (f));
++  pgtk_queue_draw_damage (f);
+   unblock_input ();
+ }
+ 
+@@ -5036,6 +5092,7 @@ pgtk_fill_rectangle (struct frame *f, unsigned long color, int x, int y,
+   cr = pgtk_begin_cr_clip (f);
+   pgtk_set_cr_source_with_color (f, color, respect_alpha_background);
+   cairo_rectangle (cr, x, y, width, height);
++  cairo_clip_preserve (cr);
+   cairo_fill (cr);
+   pgtk_end_cr_clip (f);
+ }
+@@ -7460,6 +7517,7 @@ pgtk_clear_area (struct frame *f, int x, int y, int width, int height)
+   pgtk_set_cr_source_with_color (f, FRAME_X_OUTPUT (f)->background_color,
+ 				 true);
+   cairo_rectangle (cr, x, y, width, height);
++  cairo_clip_preserve (cr);
+   cairo_fill (cr);
+   pgtk_end_cr_clip (f);
+ }
+@@ -7606,7 +7664,15 @@ pgtk_begin_cr_clip (struct frame *f)
+ void
+ pgtk_end_cr_clip (struct frame *f)
+ {
+-  cairo_restore (FRAME_CR_CONTEXT (f));
++  cairo_t *cr = FRAME_CR_CONTEXT (f);
++  double x1, y1, x2, y2;
++
++  /* Everything drawn since pgtk_begin_cr_clip lies within the current
++     clip, so that is the area to copy to the screen.  Callers that do
++     not clip therefore cause the whole frame to be copied.  */
++  cairo_clip_extents (cr, &x1, &y1, &x2, &y2);
++  pgtk_add_damage (f, x1, y1, x2 - x1, y2 - y1);
++  cairo_restore (cr);
+ }
+ 
+ void
+diff --git a/src/pgtkterm.h b/src/pgtkterm.h
+index abf16b3..861b857 100644
+--- a/src/pgtkterm.h
++++ b/src/pgtkterm.h
+@@ -418,6 +418,11 @@ #define BLUE_FROM_ULONG(color)	((color) & 0xff)
+   int cr_surface_desired_width, cr_surface_desired_height;
+   /* Cairo surface for double buffering */
+   cairo_surface_t *cr_surface_visible_bell;
++  /* Area of the back buffer drawn since it was last queued for
++     display, in widget coordinates, or NULL if none.  */
++  cairo_region_t *cr_damage;
++  /* True if all of the back buffer must be queued for display.  */
++  bool cr_damage_all;
+ #endif
+   struct atimer *atimer_visible_bell;
+ 
+-- 
+2.55.0
+

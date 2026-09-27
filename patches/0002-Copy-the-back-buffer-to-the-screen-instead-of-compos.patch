@@ -1,0 +1,50 @@
+From 6a93926db560ba15a0e9a4d4dbb8fa4e6ba65a83 Mon Sep 17 00:00:00 2001
+From: luke <luke@devmindscape.com>
+Date: Sun, 27 Sep 2026 00:57:36 +0200
+Subject: [PATCH 2/4] Copy the back buffer to the screen instead of compositing
+ it on PGTK
+
+* src/pgtkterm.c (pgtk_handle_draw): Paint an image back buffer with
+CAIRO_OPERATOR_SOURCE, clipped to its size.  This gives the same
+result as CAIRO_OPERATOR_OVER, because the back buffer is opaque or
+the window background is clear, but avoids blending every pixel.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pgtkterm.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/src/pgtkterm.c b/src/pgtkterm.c
+index 6c3d2eb..fb6d689 100644
+--- a/src/pgtkterm.c
++++ b/src/pgtkterm.c
+@@ -5165,8 +5165,26 @@ pgtk_handle_draw (GtkWidget *widget, cairo_t *cr, gpointer *data)
+ 	}
+       if (src != NULL)
+ 	{
++	  cairo_save (cr);
++	  if (cairo_surface_get_type (src) == CAIRO_SURFACE_TYPE_IMAGE)
++	    {
++	      double sx, sy;
++
++	      /* The back buffer is opaque, unless the frame has a
++		 transparent background, and then GTK does not paint the
++		 window background, leaving it clear.  In both cases,
++		 copying the back buffer gives the same result as
++		 compositing it, and is much faster.  */
++	      cairo_surface_get_device_scale (src, &sx, &sy);
++	      cairo_rectangle (cr, 0, 0,
++			       cairo_image_surface_get_width (src) / sx,
++			       cairo_image_surface_get_height (src) / sy);
++	      cairo_clip (cr);
++	      cairo_set_operator (cr, CAIRO_OPERATOR_SOURCE);
++	    }
+ 	  cairo_set_source_surface (cr, src, 0, 0);
+ 	  cairo_paint (cr);
++	  cairo_restore (cr);
+ 	}
+     }
+   return FALSE;
+-- 
+2.55.0
+
