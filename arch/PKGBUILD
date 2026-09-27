@@ -1,0 +1,105 @@
+# emacs-wayland with the emacs-vibed PGTK smooth-scrolling patches.
+#
+# Derived from Arch's emacs PKGBUILD 31.1-2
+# (https://gitlab.archlinux.org/archlinux/packaging/packages/emacs, 40d2f06),
+# reduced to the emacs-wayland variant, with identical configure flags, plus
+# ../patches/*.patch.  Keep the package name emacs-wayland and add
+# "IgnorePkg = emacs-wayland" to /etc/pacman.conf so pacman -Syu keeps it.
+#
+# Build and install:  makepkg -s --skippgpcheck && sudo pacman -U emacs-wayland-*.pkg.tar.zst
+# (--skippgpcheck: the tarball is still verified against Arch's b2sum below.)
+
+pkgname=emacs-wayland
+pkgver=31.1
+pkgrel=2.1
+arch=('x86_64')
+url='https://github.com/lszl84/emacs-vibed'
+license=(GPL-3.0-or-later)
+pkgdesc='The extensible, customizable, self-documenting real-time display editor with PGTK enabled (emacs-vibed smooth scrolling patches)'
+depends=(
+  gmp
+  gnutls
+  lcms2
+  libgccjit
+  libotf
+  libpng
+  zlib
+  libacl.so
+  libdbus-1.so
+  libfontconfig.so
+  libfreetype.so
+  libgdk-3.so
+  libgdk_pixbuf-2.0.so
+  libgif.so
+  libgio-2.0.so
+  libglib-2.0.so
+  libgobject-2.0.so
+  libgtk-3.so
+  libharfbuzz.so
+  libtree-sitter.so
+)
+makedepends=(
+  gtk3
+  libgccjit
+  tree-sitter
+)
+provides=(emacs)
+conflicts=(emacs)
+source=(
+  https://ftp.gnu.org/gnu/emacs/emacs-${pkgver}.tar.xz{,.sig}
+  0001-Copy-only-the-damaged-part-of-the-back-buffer-to-the.patch
+  0002-Copy-the-back-buffer-to-the-screen-instead-of-compos.patch
+  0003-Scroll-the-back-buffer-in-place-on-PGTK.patch
+  0004-Optionally-pace-pixel-scroll-events-to-redisplay-on-.patch
+)
+b2sums=('c9f8cf37553c0e2913eb12d7e069735c23baca3b725332f17b4b4784d1e4987c9ae098dae669e65e49fa01d8b9a63e518b210640892216e0a9ae02e51f3d0581'
+        'SKIP'
+        'd67fe5c4450a3fa8bb14e08c9ae75c08dac39c2e99a1cd9138e51b7ada062112737eba25470a9a79dc3d0ba34bbcb1d50f5912ee5026319e1db51eb42c09c394'
+        '94718faf999f3b1d85b442ca3223c61ef87e60c622997968e2c65debe33336aee8d96d0e8a775cd4f332f251bf7d5676f2c16b6ee8779fb1d4d3ab5b4367f3e1'
+        'b96508a43af72972d543d5ffd75d56d0b5f574ca80b03d97bbff71bbfe1da4b46d6165520ef1429a4b1d93180c3a401b31972102b1bf18c4b1d49d27ba08c1ef'
+        'b1cfdd964fc7606098029c438db99c331f0bb7d91af8c9eb12a392ee2018ea92f35c44a43fb47b1eee175eacb4915e089d87c9c537d81faab582ab825ab13844')
+validpgpkeys=(
+  '17E90D521672C04631B1183EE78DAE0F3115E06B'  # Eli Zaretskii <eliz@gnu.org>
+  'CEA1DE21AB108493CC9C65742E82323B8F4353EE'  # Stefan Kangas <stefankangas@gmail.com>
+  '8DC2487E51ABDD90B5C4753F0F56D0553B6D411B'  # Sean Whitton <spwhitton@spwhitton.name>
+)
+
+prepare() {
+  cd emacs-${pkgver}
+  local p
+  for p in "${srcdir}"/0*.patch; do
+    patch -p1 --no-backup-if-mismatch < "${p}"
+  done
+}
+
+build() {
+  local _confflags=(
+    --sysconfdir=/etc
+    --prefix=/usr
+    --libexecdir=/usr/lib
+    --localstatedir=/var
+    --disable-build-details
+    --with-cairo
+    --with-harfbuzz
+    --with-libsystemd
+    --with-modules
+    --with-native-compilation=aot
+    --with-tree-sitter
+  )
+
+  export ac_cv_lib_gif_EGifPutExtensionLast=yes
+
+  cd emacs-${pkgver}
+  ./configure \
+    --with-pgtk \
+    "${_confflags[@]}"
+  make bootstrap
+}
+
+package() {
+  cd emacs-${pkgver}
+  make DESTDIR="${pkgdir}" install
+
+  # fix user/root permissions on usr/share files
+  chown -R root:root "${pkgdir}/usr/share/emacs/${pkgver}"
+}

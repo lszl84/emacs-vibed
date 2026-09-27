@@ -5,3 +5,10 @@
 # Built tool binaries
 /tools/ptraceable
 /tools/vscroll/vscroll
+# makepkg output
+/arch/src/
+/arch/pkg/
+/arch/*.tar.xz
+/arch/*.tar.xz.sig
+/arch/*.pkg.tar.zst
+/arch/*.log
