@@ -4,17 +4,17 @@
 # with tools/vscroll and prints the measure.el report.  Needs the VIBED
 # instrumentation commit in TREE.
 set -e
-TREE=$1; LABEL=$2; FILE=${3:-$HOME/Developer/emacs-vibed/emacs/etc/ORG-NEWS}; shift 3 || shift $#
+TREE=$1; LABEL=$2; FILE=${3:-$1/etc/ORG-NEWS}; shift 3 || shift $#
 SEGS=("$@")
 [ ${#SEGS[@]} -eq 0 ] && SEGS=(d:3:170:1 p:2.5 u:3:170:1 p:2.5 d:2:170:2.5 p:2.5 u:2:170:2.5 p:2.5)
-T=$HOME/Developer/emacs-vibed/tools
+T=$(cd "$(dirname "$0")" && pwd)
 SRV=vibed-$LABEL-$$
 OUT=/tmp/vibed-report-$SRV.txt
 PREV_WS=$(hyprctl activeworkspace -j | jq -r .id)
 hyprctl -q dispatch "hl.dsp.focus({ workspace = \"${VIBED_WS:-9}\" })"
 if [ -n "$VIBED_HALF" ]; then
   # filler window so the test frame is tiled at half width
-  "$HOME/Developer/emacs-vibed/emacs-base/src/emacs" -Q >/dev/null 2>&1 &
+  "$TREE/src/emacs" -Q >/dev/null 2>&1 &
   FILLER=$!; sleep 1.5
 fi
 ${VIBED_PROFILE:+$T/ptraceable} "$TREE/src/emacs" -Q -l "$T/measure.el" "$FILE" \

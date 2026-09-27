@@ -148,8 +148,8 @@ or running daemon, as long as your config doesn't call `server-start`. Use `-Q` 
 leave your config out. `M-: (setq pgtk-pace-scroll-events nil)` switches patch 4 off at
 run time, for comparison.
 
-To use it permanently, `sudo make install` (or build a distro package from this tree)
-and add this to your `init.el`:
+To use it permanently, `sudo make install` (or, on Arch, use the package below) and add
+this to your `init.el`:
 
 ```elisp
 (pixel-scroll-precision-mode 1)
@@ -157,19 +157,41 @@ and add this to your `init.el`:
   (setq pgtk-pace-scroll-events t))
 ```
 
+### Arch Linux: a patched `emacs-wayland` package
+
+[`arch/PKGBUILD`](arch/PKGBUILD) is Arch's own `emacs-wayland` recipe (31.1-2), reduced to
+the Wayland variant, with the same configure flags (including native compilation) and
+the four patches applied to the 31.1 release tarball. It keeps the package name, so it
+replaces the stock package and works with the usual systemd user service and
+`emacsclient`:
+
+```bash
+cd emacs-vibed/arch
+makepkg -s --skippgpcheck        # ~30-60 min; the tarball is checked against Arch's b2sum
+sudo pacman -U emacs-wayland-31.1-2.1-x86_64.pkg.tar.zst
+```
+
+Then add `IgnorePkg = emacs-wayland` to the `[options]` section of `/etc/pacman.conf`,
+so `pacman -Syu` doesn't replace it with the stock build. When Arch ships a new Emacs,
+update `pkgver`, check that the patches still apply, and rebuild. To go back:
+`sudo pacman -S emacs-wayland` and remove the `IgnorePkg` line.
+
 ## Repository layout
 
 | Path | What |
 |---|---|
 | `patches/` | The 4 patches (`git format-patch`, GNU ChangeLog-style messages, NEWS entry). |
 | `NOTES.md` | Base commit, method, all measurements (per patch), profiles, correctness checks, known pre-existing bugs, ideas not done. |
-| `CLAUDE.md` | The original task brief: machine, constraints, source analysis, plan. |
+| `arch/` | `PKGBUILD` for a patched Arch `emacs-wayland` package (links to `patches/`). |
+| `media/` | The comparison video (GIF, 1080p and 4K MP4). |
+| `docs/task-brief.md` | The original task brief: machine, constraints, source analysis of the PGTK drawing path, plan. |
+| `CLAUDE.md` | Short orientation for coding agents. |
 | `tools/instrumentation.diff` | **Measurement-only** Emacs changes, applied on top of the patches: timings, a draw/event timeline `(vibed-stats)`, and a synthetic touchpad `(vibed-inject-scroll RATE SEGS)`. Not for daily use. |
 | `tools/run-bench.sh` | Benchmark: launches an instrumented Emacs on Hyprland workspace 9, scrolls, prints frames/s, lag, CPU and per-operation times. |
 | `tools/check-garbage.sh` | Correctness: after ~25 actions, compares a screenshot with one taken after `redraw-frame`, to catch stale pixels. |
 | `tools/measure.el`, `bench.el`, `scroll-log.el` | Lisp side of the benchmarks; per-step timing; real-touchpad event log. |
 | `tools/vscroll/` | Wayland virtual-pointer client for moving the pointer and scrolling. |
-| `tools/ptraceable.c`, `tools/prof-report.py` | Sampling profiler without root (`prctl(PR_SET_PTRACER)` + `eu-stack`). |
+| `tools/ptraceable.c`, `tools/prof-report.py` | Sampling profiler without root (`prctl(PR_SET_PTRACER)` + `eu-stack`). Build with `cc -O2 -o tools/ptraceable tools/ptraceable.c`. |
 
 ## Notes for agents working on this
 
@@ -191,5 +213,21 @@ and add this to your `init.el`:
   Anything else is a regression.
 - Emacs' commit-msg hook (installed by `autogen.sh`) enforces the CONTRIBUTE format: first
   line ≤ 68 characters, and files named in the ChangeLog must be in the diff.
+- After changing a patch, regenerate `patches/` with `git format-patch` and update the
+  checksums in `arch/PKGBUILD` (`updpkgsums`).
 - Upstreaming: changes over ~15 lines need an FSF copyright assignment from the author.
   New variables and NEWS entries belong on `master`, not a release branch.
+
+## Status
+
+Tested on one machine (above), with Hyprland on Arch Linux, at scale 2 and scale 1, as
+a plain GUI Emacs and as a daemon with emacsclient frames. Other compositors (GNOME,
+KDE, Sway) and fractional scaling are untested; reports are welcome in the issues.
+
+The patches were developed with [Claude Code](https://claude.com/claude-code); the
+commits carry a `Co-Authored-By: Claude` trailer.
+
+## License
+
+GPL-3.0-or-later, like GNU Emacs; see [LICENSE](LICENSE). The patches modify GNU Emacs,
+copyright Free Software Foundation, Inc.

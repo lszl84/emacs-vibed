@@ -1,4 +1,8 @@
-# emacs-vibed notes
+# emacs-vibed: engineering notes
+
+Design, measurements and correctness checks behind the patches. For what they do and how
+to build them, see [README.md](README.md). The original task brief and source analysis
+are in [docs/task-brief.md](docs/task-brief.md).
 
 ## Base
 
@@ -6,14 +10,16 @@
   `b4fdff95b3e686130bd376b4eb43bb719280a4a3` (2026-09-26, "; Fix last change").
 - Configure (all trees): `--with-pgtk --with-cairo --with-harfbuzz --with-modules
   --with-tree-sitter --with-native-compilation=no CFLAGS='-O2 -g3 -fno-omit-frame-pointer'`.
-- Trees:
-  - `emacs/`: branch `vibed` = base + instrumentation + the patches (used for all
-    measurements; built).
-  - `emacs-base/`: branch `base-instr` = base + instrumentation only (the "before"
-    build; built).
-  - `emacs-clean/`: branch `vibed-clean` = base + the 4 patches only. **Built; this is
-    the one to try.**
-- Patches: `patches/0001..0004` (`git format-patch b4fdff9..vibed-clean`).
+- Measurement setup: three source trees built with the flags above.
+  - "base": the base commit plus `tools/instrumentation.diff`'s instrumentation only
+    (the "before" build).
+  - "patched": the base commit plus the 4 patches plus the instrumentation (all
+    measurements below).
+  - "clean": the base commit plus the 4 patches only (for trying it out and for the
+    compiler-warning check).
+- Patches: `patches/0001..0004` (`git format-patch` of the clean tree).
+- Test machine: ThinkPad X1 Carbon 7th gen, Intel i5-8365U with UHD 620 graphics, 16 GB
+  RAM, Arch Linux (Omarchy) with Hyprland 0.56, built-in 3840x2160 panel at scale 2.
 
 ## The patches
 
@@ -22,7 +28,7 @@
 | 1 | Copy only the damaged part of the back buffer to the screen (step A) | +74 -3 | Damage tracking. `pgtk_end_cr_clip` records the clip extents of every drawing operation. Unclipped callers count as the whole frame, so a missed rectangle over-draws but never leaves stale pixels. `pgtk_fill_rectangle`, `pgtk_draw_rectangle` and `pgtk_clear_area` now clip to what they draw. Flips then `gtk_widget_queue_draw_region` only the damage. Flips to a new back buffer and the visible bell still redraw everything. |
 | 2 | Copy the back buffer to the screen instead of compositing it | +18 | `pgtk_handle_draw` paints the image back buffer with `CAIRO_OPERATOR_SOURCE`, clipped to its size, instead of OVER, inside `cairo_save`/`cairo_restore`, since GTK goes on to draw the scroll bars with the same `cairo_t`; the scroll bars are pixel-identical to the unpatched build. The result is the same: the buffer is opaque, or, with `alpha-background`, the window is app-paintable and clear. It's a blit instead of a per-pixel blend. Not in the original A/B/C plan; kept separate so it can be dropped. |
 | 3 | Scroll the back buffer in place (step B) | +70 | `pgtk_copy_bits` `memmove`s rows inside the image surface (device-scale aware, correct row order for overlap, `cairo_surface_mark_dirty_rectangle`) instead of copying through a temporary surface. Falls back to the old code for non-image surfaces, other formats, non-integral device coordinates or out-of-bounds rects. Verified at runtime: the back buffer is `CAIRO_SURFACE_TYPE_IMAGE`. |
-| 4 | Optionally pace pixel scroll events to redisplay (step C) | +168 -2 | New variable **`pgtk-pace-scroll-events`** (default nil, opt-in as CLAUDE.md asked). When non-nil, pixel scroll events (the `(nil DX DY)` wheel events of `pixel-scroll-precision-mode`) that arrive before the previous one has been redisplayed and drawn by GTK are merged into one event (deltas summed), so Emacs runs one command and one redisplay per frame GTK draws. Details below. Includes a NEWS entry. |
+| 4 | Optionally pace pixel scroll events to redisplay (step C) | +168 -2 | New variable **`pgtk-pace-scroll-events`** (default nil, opt-in because it changes how many events Lisp sees). When non-nil, pixel scroll events (the `(nil DX DY)` wheel events of `pixel-scroll-precision-mode`) that arrive before the previous one has been redisplayed and drawn by GTK are merged into one event (deltas summed), so Emacs runs one command and one redisplay per frame GTK draws. Details below. Includes a NEWS entry. |
 
 Total +330/-5 lines in `src/pgtkterm.c`, `src/pgtkterm.h`, `etc/NEWS`. No warnings with
 the git-checkout warning flags (`-Wall -Wextra ...`).
@@ -42,8 +48,8 @@ the git-checkout warning flags (`-Wall -Wextra ...`).
 - Fallback: a 50 ms GLib timeout releases a held event, e.g. if the frame isn't visible
   or redisplay didn't touch it. It never fired in the tests, including hundreds of no-op
   scrolls at the top of the buffer.
-- Why this and not the plan's "hook the frame clock" option 1: GTK already paints at most
-  once per frame-clock tick. The waste was on the Emacs side: one command plus one
+- Why not simply sync drawing to GTK's frame clock: GTK already paints at most once per
+  frame-clock tick. The waste was on the Emacs side: one command plus one
   redisplay per touchpad event (170/s), and two redisplays per drawn frame. See
   "Findings".
 - Two attempts that failed, for the record: holding events while `redisplaying_p` and
@@ -51,30 +57,24 @@ the git-checkout warning flags (`-Wall -Wextra ...`).
   polls input). Releasing on *any* draw let the draw of the *previous* redisplay release
   the next event too early; hence the 3-state flag.
 
-## How to try it
+## Trying it without installing
 
-The patched build runs as a normal GUI Emacs next to your daemon. It doesn't start a
-server; your config doesn't call `server-start`.
+A patched build runs as an ordinary GUI Emacs next to an installed one or a running
+daemon (as long as your config doesn't call `server-start`).
 
 ```bash
-# with your config (it shares recentf/savehist etc. with the daemon, like any second Emacs)
-~/Developer/emacs-vibed/emacs-clean/src/emacs \
-  --eval '(progn (pixel-scroll-precision-mode 1) (setq pgtk-pace-scroll-events t))' \
-  ~/some/large-file.org &
-
-# the same without your config, to compare against the unpatched build of the same source
-~/Developer/emacs-vibed/emacs-clean/src/emacs -Q --eval '(progn (pixel-scroll-precision-mode 1) (setq pgtk-pace-scroll-events t))' FILE &
-~/Developer/emacs-vibed/emacs-base/src/emacs  -Q --eval '(pixel-scroll-precision-mode 1)' FILE &
+# patched
+emacs-patched/src/emacs -Q --eval '(progn (pixel-scroll-precision-mode 1) (setq pgtk-pace-scroll-events t))' FILE &
+# unpatched build of the same source and flags, for comparison
+emacs-base/src/emacs -Q --eval '(pixel-scroll-precision-mode 1)' FILE &
 ```
 
-`M-: (setq pgtk-pace-scroll-events nil)` switches step C off at run time, to feel the
-difference. Steps A, B and the SOURCE paint are always on. If it's good, the next step
-would be building a package from `vibed-clean` to replace `emacs-wayland` (needs your OK
-and root).
+`M-: (setq pgtk-pace-scroll-events nil)` switches patch 4 off at run time. Patches 1–3
+are always on.
 
 ## Measuring tools (all in `tools/`)
 
-- **Instrumentation commits** (`VIBED instrumentation ...`, not in the patches): counters
+- **`tools/instrumentation.diff`** (applies on top of the patches, not for daily use): counters
   and timings for update, `pgtk_copy_bits`, `pgtk_handle_draw`; a timeline (scroll event
   from GTK, update begin, flip, draw, frame-clock phases) returned by `(vibed-stats)`; and
   **`(vibed-inject-scroll RATE SEGS)`**, a synthetic touchpad (see below).
@@ -101,12 +101,13 @@ and root).
   axis source and accumulates the values: GTK sees `axis_source 0` (wheel), value 0 on 7 of
   8 events and `15.0` + `axis_discrete 1` on the 8th, from the "Wayland Wheel Scrolling"
   device (Emacs class `mouse`). So `vscroll` gives ~21 wheel clicks/s, not a touchpad
-  stream, and `pixel-scroll-precision` takes the *interpolation* path for it. My first
-  numbers were of that path. `/dev/uinput` needs root, so the real touchpad is emulated
+  stream, and `pixel-scroll-precision` takes the *interpolation* path for it. The first
+  numbers taken were of that path. `/dev/uinput` needs root, so the real touchpad is emulated
   **inside Emacs**: a GLib timeout queues GDK smooth-scroll events with
   `gdk_display_put_event` at 170 Hz, catching up in bursts when Emacs was busy, like
-  events piling up in the Wayland socket. It reproduces the section-3 observations: one
-  command per event, and most events arrive while Emacs is busy.
+  events piling up in the Wayland socket. It reproduces what was seen with the real touchpad (via
+  `tools/scroll-log.el`): ~170 events/s, one command per event, and most events arriving
+  while Emacs is still busy.
 - GTK has no touchpad slave device here; injected events come from "Core Pointer"
   (class `core-pointer`), which takes the same non-interpolating path as a touchpad.
 
@@ -150,7 +151,7 @@ Per-operation averages (ms): `pgtk_handle_draw` 7.9 (base, area 1.79 M logical p
 5.5 (A, 1.46 M) → 4.65 (SOURCE) → 5.8 paced (1.58 M; more scrolled per frame).
 `pgtk_copy_bits` 9.8 (base) → 3.7 (B). Update (glyph drawing incl. copy) 8.5 → 4.2.
 
-### Synthetic touchpad, half-width tiled frame (how the user's frames sit)
+### Synthetic touchpad, half-width tiled frame (typical tiling-WM layout)
 
 | Build | presents/s d10 / u10 / d25 / u25 | interval median / p90 | lag after stop (ms) |
 |---|---|---|---|
@@ -195,14 +196,14 @@ tooltip frame renders); `blink-cursor-mode` off for determinism.
 Run in all of these configurations, with pacing on:
 - plain GUI on eDP-1 (scale 2)
 - daemon (`--fg-daemon=<private name>`) + `emacsclient -c`
-- a temporary headless Hyprland output at **scale 1** (the Studio Display was unplugged)
+- a temporary headless Hyprland output at **scale 1**
 - moving the frame scale 1 → 2 → 1 and scrolling after each move (checked sharp at 2x)
 
 Also:
 - with `alpha-background` 60 (garbage check; plus a screenshot identical to the unpatched
   build, pixel for pixel)
-- with **your config** (a copy, via `--init-directory`): it loads without warnings, and a
-  screenshot is identical to the unpatched build
+- with the author's full personal config (Omarchy theme; via `--init-directory`): it
+  loads without warnings, and a screenshot is identical to the unpatched build
 - the GTK scroll bar is identical to the unpatched build (patch 2 no longer leaks cairo
   state to it)
 
@@ -216,18 +217,7 @@ The only failures are identical on the unpatched build, so they're pre-existing:
 Not covered automatically: real touchpad hands, `visible-bell` beyond the above, images
 (ORG-NEWS has none) and child frames other than tooltips.
 
-## Things I changed on the machine while you slept (all undone)
-
-- Test Emacs instances on workspace 9 (and, for a few seconds during the monitor-move
-  test, one tiled next to your windows on workspace 1). All killed; your windows are back
-  in place.
-- `hyprctl output create headless VIBED` + a runtime rule
-  `hl.monitor({ output = "VIBED", ..., scale = 1 })` for the scale-1 tests. The output is
-  removed and eDP-1 is back at 0,0 scale 2. The runtime rule only matches an output named
-  "VIBED" and disappears on the next Hyprland config reload.
-- Nothing installed, no root, daemon/package/config untouched.
-
-## Ideas not done (would need your OK)
+## Ideas not implemented
 
 1. **Skip GtkWindow's CSS background under the Emacs widget** (~22% of the remaining
    frame time at 4K, ~4 ms/frame). Make the toplevel app-paintable (pgtk already does that
@@ -236,16 +226,19 @@ Not covered automatically: real touchpad hands, `visible-bell` beyond the above,
    compositors (not Hyprland) would lose their shadow, and the menu/tool bar backgrounds
    need care.
 2. **Default `pgtk-pace-scroll-events` to t.** It only merges events that Emacs would
-   otherwise process late; I made it opt-in because CLAUDE.md asked for that when
-   semantics change (Lisp sees fewer, larger wheel events).
+   otherwise process late, but it is opt-in because Lisp then sees fewer, larger wheel
+   events; an upstream default would be up to the Emacs maintainers.
 3. GDK's clear of the paint region can't be avoided in GTK 3, and redisplay layout
    (~7 ms/frame) is Emacs core.
 
-## Upstreaming (not done; needs your go-ahead)
+## Upstreaming
 
-- For bug#72960. Changes are ~330 lines, so an **FSF copyright assignment** is needed
-  from the author before they can be accepted.
-- New features (the variable, NEWS) would go to `master`, not `emacs-31`; the NEWS entry
-  is currently in the 31.2 section of this branch.
-- The commit messages follow CONTRIBUTE (the Emacs commit-msg hook accepted them), and
-  carry a `Co-Authored-By: Claude` trailer; decide whether to keep it.
+Not submitted yet. The natural place is bug#72960. Notes for whoever submits:
+
+- The changes are ~330 lines, so the author needs an **FSF copyright assignment** before
+  they can be accepted.
+- New features (the variable and its NEWS entry) belong on `master`, not on the
+  `emacs-31` release branch; the NEWS entry currently sits in the 31.2 section.
+- The commit messages follow CONTRIBUTE (the Emacs commit-msg hook accepts them) and
+  carry a `Co-Authored-By: Claude` trailer, since the patches were written with Claude
+  Code.

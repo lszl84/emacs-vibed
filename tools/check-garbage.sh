@@ -4,8 +4,8 @@
 # action, screenshot the Emacs window, force a full redraw (redraw-frame),
 # screenshot again and count differing pixels.  Any difference means the
 # screen was left with stale pixels.  Screenshots go to /tmp/vibed-garbage/.
-TREE=$1; FILE=${2:-$HOME/Developer/emacs-vibed/emacs/etc/ORG-NEWS}
-T=$HOME/Developer/emacs-vibed/tools
+TREE=$1; FILE=${2:-$1/etc/ORG-NEWS}
+T=$(cd "$(dirname "$0")" && pwd)
 SRV=vibed-garbage-$$
 D=/tmp/vibed-garbage; rm -rf $D; mkdir -p $D
 PREV_WS=$(hyprctl activeworkspace -j | jq -r .id)

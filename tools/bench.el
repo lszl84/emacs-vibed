@@ -1,7 +1,7 @@
 ;;; bench.el --- synthetic pixel-scroll timing for emacs-vibed  -*- lexical-binding: t; -*-
 
 ;; Usage, in the test Emacs (on the 4K panel, with a large file open):
-;;   (load "~/Developer/emacs-vibed/tools/bench.el")
+;;   (load "/path/to/emacs-vibed/tools/bench.el")
 ;;   (vibed-bench)          ; 120 steps of 30 px each way
 ;;   (vibed-bench 200 10)   ; custom step count and size
 ;; Restores the window's start and point afterwards.  Only measures Lisp +

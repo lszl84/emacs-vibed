@@ -1,7 +1,7 @@
 ;;; scroll-log.el --- log real touchpad scroll events for emacs-vibed  -*- lexical-binding: t; -*-
 
 ;; Usage, in the test Emacs:
-;;   (load "~/Developer/emacs-vibed/tools/scroll-log.el")
+;;   (load "/path/to/emacs-vibed/tools/scroll-log.el")
 ;;   (vibed-scroll-log-start)
 ;;   ...the user scrolls up and down for ~10 s...
 ;;   (vibed-scroll-log-report)   ; also stops logging
